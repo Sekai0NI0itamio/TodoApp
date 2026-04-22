@@ -88,10 +88,8 @@ final class TodoManager: ObservableObject {
     private var checkpointWorkItem: DispatchWorkItem?
     private var didAttemptAccessibilityRepair = false
     private var accessibilityTrustPollTimer: Timer?
-
-    private static let accessibilityResetCooldown: TimeInterval = 6 * 60 * 60
-    private static let accessibilityLastResetAtKey = "AdvancedTodo.AccessibilityLastResetAt"
-    private static let accessibilityLastExecutablePathKey = "AdvancedTodo.AccessibilityLastExecutablePath"
+    private var didAutoRestartAfterAccessibilityGrant = false
+    private let wasAccessibilityTrustedAtLaunch: Bool
 
     private let checkpointDelay: TimeInterval = 5
     private var lastDistractionPromptAt: Date?
@@ -190,6 +188,8 @@ final class TodoManager: ObservableObject {
     }
 
     init() {
+        wasAccessibilityTrustedAtLaunch = AXIsProcessTrusted()
+
         let fileManager = FileManager.default
         let applicationSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? fileManager.homeDirectoryForCurrentUser
@@ -641,12 +641,14 @@ final class TodoManager: ObservableObject {
             }
 
             let trusted = AXIsProcessTrusted()
+            let previouslyGranted = self.blockerSettings.accessibilityPermissionGranted
             if self.blockerSettings.accessibilityPermissionGranted != trusted {
                 self.blockerSettings.accessibilityPermissionGranted = trusted
                 if self.debugModeEnabled {
                     print("[Blocker] Accessibility trust poll update: \(trusted)")
                 }
             }
+            self.maybeAutoRestartAfterAccessibilityGrant(previouslyGranted: previouslyGranted, nowGranted: trusted)
 
             remainingChecks -= 1
             if trusted || remainingChecks <= 0 {
@@ -662,58 +664,67 @@ final class TodoManager: ObservableObject {
         guard !didAttemptAccessibilityRepair else { return }
         didAttemptAccessibilityRepair = true
 
-                guard !AXIsProcessTrusted(),
+        guard !AXIsProcessTrusted(),
               let bundleID = Bundle.main.bundleIdentifier,
-                            !bundleID.isEmpty,
-                            shouldAttemptAccessibilityRepair() else {
+              !bundleID.isEmpty else {
             return
         }
 
         let process = Process()
+        let stderrPipe = Pipe()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
         process.arguments = ["reset", "Accessibility", bundleID]
+        process.standardError = stderrPipe
 
         do {
             try process.run()
             process.waitUntilExit()
-            UserDefaults.standard.set(Date(), forKey: Self.accessibilityLastResetAtKey)
             if debugModeEnabled {
+                let errData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+                let stderrText = String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 print("[Blocker] Ran tccutil reset for Accessibility (\(bundleID)). Exit code: \(process.terminationStatus)")
+                if !stderrText.isEmpty {
+                    print("[Blocker] tccutil stderr: \(stderrText)")
+                }
             }
         } catch {
             if debugModeEnabled {
                 print("[Blocker] Failed to run tccutil reset for Accessibility: \(error.localizedDescription)")
             }
         }
-
-        UserDefaults.standard.set(Bundle.main.executablePath ?? "", forKey: Self.accessibilityLastExecutablePathKey)
-    }
-
-    private func shouldAttemptAccessibilityRepair() -> Bool {
-        let defaults = UserDefaults.standard
-        let lastPath = defaults.string(forKey: Self.accessibilityLastExecutablePathKey)
-        let currentPath = Bundle.main.executablePath ?? ""
-        let pathChanged = lastPath != nil && lastPath != currentPath
-
-        if pathChanged {
-            return true
-        }
-
-        guard let lastResetAt = defaults.object(forKey: Self.accessibilityLastResetAtKey) as? Date else {
-            return true
-        }
-
-        return Date().timeIntervalSince(lastResetAt) >= Self.accessibilityResetCooldown
     }
     
     /// Syncs the accessibility permission state with the actual system state.
     /// Call this on startup and after the user returns from System Settings.
     func syncAccessibilityPermission() {
         let actuallyGranted = AXIsProcessTrusted()
+        let previouslyGranted = blockerSettings.accessibilityPermissionGranted
         if blockerSettings.accessibilityPermissionGranted != actuallyGranted {
             blockerSettings.accessibilityPermissionGranted = actuallyGranted
             if debugModeEnabled {
                 print("[Blocker] Auto-synced accessibility permission: \(actuallyGranted)")
+            }
+        }
+        maybeAutoRestartAfterAccessibilityGrant(previouslyGranted: previouslyGranted, nowGranted: actuallyGranted)
+    }
+
+    private func maybeAutoRestartAfterAccessibilityGrant(previouslyGranted: Bool, nowGranted: Bool) {
+        guard !didAutoRestartAfterAccessibilityGrant,
+              !wasAccessibilityTrustedAtLaunch,
+              !previouslyGranted,
+              nowGranted else {
+            return
+        }
+
+        didAutoRestartAfterAccessibilityGrant = true
+        if debugModeEnabled {
+            print("[Blocker] Accessibility permission granted. Restarting app to apply permission-dependent behavior.")
+        }
+
+        let appURL = Bundle.main.bundleURL
+        NSWorkspace.shared.openApplication(at: appURL, configuration: NSWorkspace.OpenConfiguration()) { _, _ in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                NSApp.terminate(nil)
             }
         }
     }
@@ -902,23 +913,9 @@ final class TodoManager: ObservableObject {
             return
         }
         lastDistractionPromptAt = now
-        revealMainTodoWindowForFocusBlocker()
         blockerPromptNonce += 1
         if debugModeEnabled {
             print("[Blocker] Triggering prompt. Distraction: \(latestDetectedDistraction ?? "none")")
-        }
-    }
-
-    private func revealMainTodoWindowForFocusBlocker() {
-        DispatchQueue.main.async {
-            for window in NSApplication.shared.windows where isMainAppWindow(window) {
-                window.collectionBehavior.insert(.canJoinAllSpaces)
-                window.collectionBehavior.insert(.fullScreenAuxiliary)
-                window.collectionBehavior.insert(.moveToActiveSpace)
-                window.level = .floating
-                window.orderFrontRegardless()
-                break
-            }
         }
     }
 
@@ -991,9 +988,7 @@ final class TodoManager: ObservableObject {
             // Find and show the main window
             for window in NSApplication.shared.windows {
                 if isMainAppWindow(window) {
-                    window.collectionBehavior.insert(.moveToActiveSpace)
-                    window.orderFrontRegardless()
-                    window.makeKey()
+                    window.makeKeyAndOrderFront(nil)
                     NSApp.activate(ignoringOtherApps: true)
                     break
                 }
@@ -1221,7 +1216,7 @@ enum DistractionDetector {
     static func isShortsTypeDistraction(_ match: String) -> Bool {
         let lower = match.lowercased()
         let shortsPatterns = [
-            "youtube shorts", "youtube",
+            "youtube shorts",
             "tiktok", "instagram", "reels",
             "twitter", "x.com", "reddit",
             "facebook", "snapchat", "threads",
@@ -1536,7 +1531,7 @@ struct AdvancedTodoApp: App {
         for window in NSApplication.shared.windows {
             if isDebugWindow(window) { continue }
             window.level = .floating
-            window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .moveToActiveSpace]
+            window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
             window.identifier = NSUserInterfaceItemIdentifier(mainWindowName)
             window.setFrameAutosaveName(mainWindowName)
             window.minSize = minimumWindowSize
@@ -1661,17 +1656,9 @@ final class BlockerPromptWindowController {
     private var window: NSWindow?
     private weak var manager: TodoManager?
 
-    private func activeScreenFrame() -> NSRect {
-        let mouseLocation = NSEvent.mouseLocation
-        if let screen = NSScreen.screens.first(where: { NSMouseInRect(mouseLocation, $0.frame, false) }) {
-            return screen.frame
-        }
-        return NSScreen.main?.frame ?? NSRect(x: 80, y: 80, width: 1200, height: 800)
-    }
-
     func show(manager: TodoManager) {
         self.manager = manager
-        let screenRect = activeScreenFrame()
+        let screenRect = NSScreen.main?.visibleFrame ?? NSRect(x: 80, y: 80, width: 1200, height: 800)
         let width = screenRect.width * 0.75
         let height = screenRect.height * 0.75
         let originX = screenRect.midX - width / 2
@@ -1690,9 +1677,9 @@ final class BlockerPromptWindowController {
                 defer: false
             )
             promptWindow.title = "Focus Reminder"
-            promptWindow.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.screenSaverWindow)) - 1)
-            promptWindow.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .moveToActiveSpace, .ignoresCycle]
-            promptWindow.hidesOnDeactivate = false
+            // Use .statusBar+1 so it floats above all other windows including
+            // the main app window which is at .floating level.
+            promptWindow.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.statusWindow)) + 1)
             promptWindow.contentView = host
             promptWindow.isReleasedWhenClosed = false
             promptWindow.minSize = NSSize(width: 480, height: 360)
@@ -1700,9 +1687,8 @@ final class BlockerPromptWindowController {
         }
 
         window?.setFrame(NSRect(x: originX, y: originY, width: width, height: height), display: true)
+        window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-        window?.orderFrontRegardless()
-        window?.makeKey()
     }
 
     func hide() {
@@ -3167,7 +3153,7 @@ struct BlockerSettingsView: View {
                             set: { manager.blockerSettings.autoCloseTabsOnSecondStrike = $0 }
                         ))
 
-                        Text("When on, if a shorts-type distraction (YouTube, TikTok, Instagram, Reddit, etc.) is detected twice in a row, the browser tab is automatically closed with Cmd+W. Requires Accessibility permission. Chat apps and standalone apps like Discord or Steam are never auto-closed.")
+                        Text("When on, if a shorts-type distraction (YouTube Shorts, TikTok, Instagram Reels, etc.) is detected twice in a row, the browser tab is automatically closed with Cmd+W. Normal YouTube pages (home/feed/videos) only trigger the reminder popup and are not auto-closed. Requires Accessibility permission. Chat apps and standalone apps like Discord or Steam are never auto-closed.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)

@@ -21,7 +21,7 @@ struct BlockerSettings: Codable, Equatable {
             isEnabled: false,
             appMonitoringPermissionGranted: false,
             accessibilityPermissionGranted: false,
-            blockYouTubeVideos: true,
+            blockYouTubeVideos: false,
             autoCloseTabsOnSecondStrike: true,
             blockDurationSeconds: 60,
             preventWindowClose: true,
@@ -103,7 +103,7 @@ extension BlockerSettings {
         isEnabled = try c.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? false
         appMonitoringPermissionGranted = try c.decodeIfPresent(Bool.self, forKey: .appMonitoringPermissionGranted) ?? false
         accessibilityPermissionGranted = try c.decodeIfPresent(Bool.self, forKey: .accessibilityPermissionGranted) ?? false
-        blockYouTubeVideos = try c.decodeIfPresent(Bool.self, forKey: .blockYouTubeVideos) ?? true
+        blockYouTubeVideos = try c.decodeIfPresent(Bool.self, forKey: .blockYouTubeVideos) ?? false
         autoCloseTabsOnSecondStrike = try c.decodeIfPresent(Bool.self, forKey: .autoCloseTabsOnSecondStrike) ?? true
         blockDurationSeconds = try c.decodeIfPresent(Int.self, forKey: .blockDurationSeconds) ?? 60
         preventWindowClose = try c.decodeIfPresent(Bool.self, forKey: .preventWindowClose) ?? true

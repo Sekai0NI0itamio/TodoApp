@@ -17,9 +17,9 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.1.0</string>
+	<string>1.1.1</string>
 	<key>CFBundleVersion</key>
-	<string>3</string>
+	<string>5</string>
 	<key>Description</key>
 	<string>An organization dedicated to providing essential tools for individuals who seek to become entrepeneurs, in which this app ensures that whatever tasks you have you will not forget.</string>
 	<key>LSMinimumSystemVersion</key>
