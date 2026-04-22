@@ -869,6 +869,63 @@ final class TodoManager: ObservableObject {
         blockerSettings.motivationalPhrases.remove(atOffsets: offsets)
     }
 
+    func resetBlockerOverviewSettingsToDefault() {
+        let defaults = BlockerSettings.default()
+        blockerSettings.isEnabled = defaults.isEnabled
+        blockerSettings.blockYouTubeVideos = defaults.blockYouTubeVideos
+        blockerSettings.autoCloseTabsOnSecondStrike = defaults.autoCloseTabsOnSecondStrike
+        blockerSettings.blockDurationSeconds = defaults.blockDurationSeconds
+    }
+
+    func resetWindowSettingsToDefault() {
+        let defaults = BlockerSettings.default()
+        blockerSettings.preventWindowClose = defaults.preventWindowClose
+        blockerSettings.autoReopenEnabled = defaults.autoReopenEnabled
+        blockerSettings.autoReopenMinutes = defaults.autoReopenMinutes
+    }
+
+    func resetReminderAppsToDefault() {
+        blockerSettings.reminderApps = BlockerSettings.default().reminderApps
+    }
+
+    func resetReminderWebsitesToDefault() {
+        blockerSettings.reminderWebsites = BlockerSettings.default().reminderWebsites
+    }
+
+    func resetReminderCategoryToDefault() {
+        let defaults = BlockerSettings.default()
+        blockerSettings.reminderApps = defaults.reminderApps
+        blockerSettings.reminderWebsites = defaults.reminderWebsites
+    }
+
+    func resetAutoCloseAppsToDefault() {
+        blockerSettings.autoCloseApps = BlockerSettings.default().autoCloseApps
+    }
+
+    func resetAutoCloseWebsitesToDefault() {
+        blockerSettings.autoCloseWebsites = BlockerSettings.default().autoCloseWebsites
+    }
+
+    func resetAutoCloseCategoryToDefault() {
+        let defaults = BlockerSettings.default()
+        blockerSettings.autoCloseApps = defaults.autoCloseApps
+        blockerSettings.autoCloseWebsites = defaults.autoCloseWebsites
+    }
+
+    func resetBlockedKeywordsToDefault() {
+        blockerSettings.blockedKeywords = BlockerSettings.default().blockedKeywords
+    }
+
+    func resetMotivationalPhrasesToDefault() {
+        blockerSettings.motivationalPhrases = BlockerSettings.default().motivationalPhrases
+    }
+
+    func resetSharedBlockerSupportToDefault() {
+        let defaults = BlockerSettings.default()
+        blockerSettings.blockedKeywords = defaults.blockedKeywords
+        blockerSettings.motivationalPhrases = defaults.motivationalPhrases
+    }
+
     func evaluateDistraction() {
         guard blockerSettings.isEnabled, blockerSettings.appMonitoringPermissionGranted else {
             latestDetectedDistraction = nil
@@ -3247,13 +3304,19 @@ struct WindowSettingsView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
 
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Window")
-                        .font(.title2.bold())
-                    Text("Control how the todo window behaves when closed or minimized.")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                HStack(alignment: .top) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Window")
+                            .font(.title2.bold())
+                        Text("Control how the todo window behaves when closed or minimized.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer()
+                    Button("Reset Window") {
+                        manager.resetWindowSettingsToDefault()
+                    }
                 }
 
                 Divider()
@@ -3420,13 +3483,19 @@ struct BlockerSettingsView: View {
 
     private var blockerOverviewSection: some View {
         VStack(alignment: .leading, spacing: 20) {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Focus Blocker")
-                    .font(.title2.bold())
-                Text("General Blocker shows every blocker page stitched together. As you scroll through the connected sections, the sidebar follows along so it feels like one continuous setup flow.")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Focus Blocker")
+                        .font(.title2.bold())
+                    Text("General Blocker shows every blocker page stitched together. As you scroll through the connected sections, the sidebar follows along so it feels like one continuous setup flow.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer()
+                Button("Reset General") {
+                    manager.resetBlockerOverviewSettingsToDefault()
+                }
             }
 
             Divider()
@@ -3522,7 +3591,9 @@ struct BlockerSettingsView: View {
         VStack(alignment: .leading, spacing: 20) {
             blockerSectionHeader(
                 title: "Reminder Category",
-                description: "Detected items here show the blocker popup but are not force-closed. Adding a reminder item now also offers to mirror it into Auto Close."
+                description: "Detected items here show the blocker popup but are not force-closed. Adding a reminder item now also offers to mirror it into Auto Close.",
+                resetTitle: "Reset Reminder",
+                onReset: manager.resetReminderCategoryToDefault
             )
 
             HStack(alignment: .top, spacing: 16) {
@@ -3533,7 +3604,8 @@ struct BlockerSettingsView: View {
                     placeholder: "App name or bundle ID",
                     newValue: $newReminderApp,
                     onAdd: handleReminderAppAdd,
-                    onDelete: manager.removeBlockedApp
+                    onDelete: manager.removeBlockedApp,
+                    onReset: manager.resetReminderAppsToDefault
                 )
 
                 blockerListSection(
@@ -3543,7 +3615,8 @@ struct BlockerSettingsView: View {
                     placeholder: "Domain or URL fragment",
                     newValue: $newReminderSite,
                     onAdd: handleReminderSiteAdd,
-                    onDelete: manager.removeBlockedWebsite
+                    onDelete: manager.removeBlockedWebsite,
+                    onReset: manager.resetReminderWebsitesToDefault
                 )
             }
 
@@ -3557,7 +3630,9 @@ struct BlockerSettingsView: View {
         VStack(alignment: .leading, spacing: 20) {
             blockerSectionHeader(
                 title: "Auto Close Category",
-                description: "These are the force-close rules. Apps are terminated after repeated detections and browser tabs are closed on the second strike. Adding an item here can also mirror it into Reminder."
+                description: "These are the force-close rules. Apps are terminated after repeated detections and browser tabs are closed on the second strike. Adding an item here can also mirror it into Reminder.",
+                resetTitle: "Reset Auto Close",
+                onReset: manager.resetAutoCloseCategoryToDefault
             )
 
             HStack(alignment: .top, spacing: 16) {
@@ -3568,7 +3643,8 @@ struct BlockerSettingsView: View {
                     placeholder: "App name or bundle ID",
                     newValue: $newAutoCloseApp,
                     onAdd: handleAutoCloseAppAdd,
-                    onDelete: manager.removeAutoCloseApp
+                    onDelete: manager.removeAutoCloseApp,
+                    onReset: manager.resetAutoCloseAppsToDefault
                 )
 
                 blockerListSection(
@@ -3578,7 +3654,8 @@ struct BlockerSettingsView: View {
                     placeholder: "Domain or URL fragment",
                     newValue: $newAutoCloseSite,
                     onAdd: handleAutoCloseSiteAdd,
-                    onDelete: manager.removeAutoCloseWebsite
+                    onDelete: manager.removeAutoCloseWebsite,
+                    onReset: manager.resetAutoCloseWebsitesToDefault
                 )
             }
 
@@ -3592,7 +3669,9 @@ struct BlockerSettingsView: View {
         VStack(alignment: .leading, spacing: 20) {
             blockerSectionHeader(
                 title: "Shared Blocker Support",
-                description: "This was the floating independent blocker area before. It now stays tied into the blocker categories so the shared lists are available wherever you work."
+                description: "This was the floating independent blocker area before. It now stays tied into the blocker categories so the shared lists are available wherever you work.",
+                resetTitle: "Reset Shared Lists",
+                onReset: manager.resetSharedBlockerSupportToDefault
             )
 
             HStack(alignment: .top, spacing: 16) {
@@ -3607,7 +3686,8 @@ struct BlockerSettingsView: View {
                             newKeyword = ""
                         }
                     },
-                    onDelete: manager.removeBlockedKeyword
+                    onDelete: manager.removeBlockedKeyword,
+                    onReset: manager.resetBlockedKeywordsToDefault
                 )
 
                 blockerListSection(
@@ -3621,7 +3701,8 @@ struct BlockerSettingsView: View {
                             newPhrase = ""
                         }
                     },
-                    onDelete: manager.removeMotivationPhrase
+                    onDelete: manager.removeMotivationPhrase,
+                    onReset: manager.resetMotivationalPhrasesToDefault
                 )
             }
 
@@ -3637,14 +3718,25 @@ struct BlockerSettingsView: View {
         }
     }
 
-    private func blockerSectionHeader(title: String, description: String) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title)
-                .font(.title3.bold())
-            Text(description)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+    private func blockerSectionHeader(
+        title: String,
+        description: String,
+        resetTitle: String? = nil,
+        onReset: (() -> Void)? = nil
+    ) -> some View {
+        HStack(alignment: .top) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(title)
+                    .font(.title3.bold())
+                Text(description)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+            if let resetTitle, let onReset {
+                Button(resetTitle, action: onReset)
+            }
         }
     }
 
@@ -3708,16 +3800,26 @@ struct BlockerSettingsView: View {
         placeholder: String,
         newValue: Binding<String>,
         onAdd: @escaping () -> Void,
-        onDelete: @escaping (IndexSet) -> Void
+        onDelete: @escaping (IndexSet) -> Void,
+        onReset: (() -> Void)? = nil
     ) -> some View {
         GroupBox {
             VStack(alignment: .leading, spacing: 8) {
-                Text(title)
-                    .font(.headline)
-                Text(subtitle)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                HStack(alignment: .top) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(title)
+                            .font(.headline)
+                        Text(subtitle)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer()
+                    if let onReset {
+                        Button("Reset", action: onReset)
+                            .font(.caption)
+                    }
+                }
 
                 List {
                     ForEach(items, id: \.self) { item in
