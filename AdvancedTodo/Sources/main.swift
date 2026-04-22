@@ -732,25 +732,49 @@ final class TodoManager: ObservableObject {
     func addBlockedApp(_ app: String) {
         let cleaned = app.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleaned.isEmpty else { return }
-        if !blockerSettings.blockedApps.contains(where: { $0.caseInsensitiveCompare(cleaned) == .orderedSame }) {
-            blockerSettings.blockedApps.append(cleaned)
+        if !blockerSettings.reminderApps.contains(where: { $0.caseInsensitiveCompare(cleaned) == .orderedSame }) {
+            blockerSettings.reminderApps.append(cleaned)
         }
     }
 
     func removeBlockedApp(at offsets: IndexSet) {
-        blockerSettings.blockedApps.remove(atOffsets: offsets)
+        blockerSettings.reminderApps.remove(atOffsets: offsets)
+    }
+
+    func addAutoCloseApp(_ app: String) {
+        let cleaned = app.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else { return }
+        if !blockerSettings.autoCloseApps.contains(where: { $0.caseInsensitiveCompare(cleaned) == .orderedSame }) {
+            blockerSettings.autoCloseApps.append(cleaned)
+        }
+    }
+
+    func removeAutoCloseApp(at offsets: IndexSet) {
+        blockerSettings.autoCloseApps.remove(atOffsets: offsets)
     }
 
     func addBlockedWebsite(_ website: String) {
         let cleaned = website.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleaned.isEmpty else { return }
-        if !blockerSettings.blockedWebsites.contains(where: { $0.caseInsensitiveCompare(cleaned) == .orderedSame }) {
-            blockerSettings.blockedWebsites.append(cleaned)
+        if !blockerSettings.reminderWebsites.contains(where: { $0.caseInsensitiveCompare(cleaned) == .orderedSame }) {
+            blockerSettings.reminderWebsites.append(cleaned)
         }
     }
 
     func removeBlockedWebsite(at offsets: IndexSet) {
-        blockerSettings.blockedWebsites.remove(atOffsets: offsets)
+        blockerSettings.reminderWebsites.remove(atOffsets: offsets)
+    }
+
+    func addAutoCloseWebsite(_ website: String) {
+        let cleaned = website.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else { return }
+        if !blockerSettings.autoCloseWebsites.contains(where: { $0.caseInsensitiveCompare(cleaned) == .orderedSame }) {
+            blockerSettings.autoCloseWebsites.append(cleaned)
+        }
+    }
+
+    func removeAutoCloseWebsite(at offsets: IndexSet) {
+        blockerSettings.autoCloseWebsites.remove(atOffsets: offsets)
     }
 
     func addBlockedKeyword(_ keyword: String) {
@@ -804,14 +828,28 @@ final class TodoManager: ObservableObject {
         // ── Layer 1: App name / bundle ID match ──────────────────────────────
         // App-level distractions (Discord, Steam, etc.) are not browser tabs —
         // we show the prompt but never auto-close them.
-        if let match = blockerSettings.blockedApps.first(where: { blocked in
+        if let match = blockerSettings.autoCloseApps.first(where: { blocked in
+            let needle = blocked.lowercased()
+            return appName.contains(needle) || bundleID.contains(needle)
+        }) {
+            latestDetectedDistraction = match
+            if debugModeEnabled {
+                print("[Blocker] Layer 1 match (auto-close app): \(match)")
+            }
+            handleAutoCloseStrike(match: match, pid: activeApp.processIdentifier) {
+                DistractionDetector.closeDistractingApp(pid: activeApp.processIdentifier)
+            }
+            return
+        }
+
+        if let match = blockerSettings.reminderApps.first(where: { blocked in
             let needle = blocked.lowercased()
             return appName.contains(needle) || bundleID.contains(needle)
         }) {
             latestDetectedDistraction = match
             consecutiveShortsStrikes = 0
             if debugModeEnabled {
-                print("[Blocker] Layer 1 match (app): \(match)")
+                print("[Blocker] Layer 1 match (reminder app): \(match)")
             }
             triggerPromptIfNeeded()
             return
@@ -837,17 +875,18 @@ final class TodoManager: ObservableObject {
         }
         if let windowMatch = DistractionDetector.checkWindowTitles(
             for: activeApp.processIdentifier,
-            blockedWebsites: blockerSettings.blockedWebsites,
+            reminderWebsites: blockerSettings.reminderWebsites,
+            autoCloseWebsites: blockerSettings.autoCloseWebsites,
             blockedKeywords: blockerSettings.blockedKeywords,
             blockYouTubeVideos: blockerSettings.blockYouTubeVideos,
             isBrowser: isBrowser,
             debugMode: debugModeEnabled
         ) {
-            latestDetectedDistraction = windowMatch
+            latestDetectedDistraction = windowMatch.label
             if debugModeEnabled {
-                print("[Blocker] Layer 2 match (window title): \(windowMatch)")
+                print("[Blocker] Layer 2 match (window title): \(windowMatch.label) [\(windowMatch.action == .autoClose ? "auto-close" : "reminder")]")
             }
-            handleShortsStrike(match: windowMatch, pid: activeApp.processIdentifier)
+            handleWebsiteMatch(windowMatch, pid: activeApp.processIdentifier)
             return
         }
 
@@ -855,16 +894,17 @@ final class TodoManager: ObservableObject {
         if blockerSettings.accessibilityPermissionGranted, AXIsProcessTrusted() {
             if let axMatch = DistractionDetector.checkAXWindowTitle(
                 for: activeApp.processIdentifier,
-                blockedWebsites: blockerSettings.blockedWebsites,
+                reminderWebsites: blockerSettings.reminderWebsites,
+                autoCloseWebsites: blockerSettings.autoCloseWebsites,
                 blockedKeywords: blockerSettings.blockedKeywords,
                 blockYouTubeVideos: blockerSettings.blockYouTubeVideos,
                 debugMode: debugModeEnabled
             ) {
-                latestDetectedDistraction = axMatch
+                latestDetectedDistraction = axMatch.label
                 if debugModeEnabled {
-                    print("[Blocker] Layer 3 match (AX title): \(axMatch)")
+                    print("[Blocker] Layer 3 match (AX title): \(axMatch.label) [\(axMatch.action == .autoClose ? "auto-close" : "reminder")]")
                 }
-                handleShortsStrike(match: axMatch, pid: activeApp.processIdentifier)
+                handleWebsiteMatch(axMatch, pid: activeApp.processIdentifier)
                 return
             }
         } else if debugModeEnabled {
@@ -879,25 +919,33 @@ final class TodoManager: ObservableObject {
         consecutiveShortsStrikes = 0
     }
 
-    /// Tracks consecutive "shorts-type" detections and auto-closes the tab on strike 2.
-    private func handleShortsStrike(match: String, pid: pid_t) {
-        let isShorts = DistractionDetector.isShortsTypeDistraction(match)
-
-        if isShorts {
-            consecutiveShortsStrikes += 1
-            if consecutiveShortsStrikes >= 2 {
-                consecutiveShortsStrikes = 0
-                // Auto-close only if the user has enabled it AND accessibility is granted
-                if blockerSettings.autoCloseTabsOnSecondStrike,
-                   blockerSettings.accessibilityPermissionGranted,
-                   AXIsProcessTrusted() {
-                    DistractionDetector.closeDistractionTab(pid: pid)
-                    lastAutoClosedDistraction = match
-                    tabAutoClosedNonce += 1
+    private func handleWebsiteMatch(_ match: DistractionDetector.MatchResult, pid: pid_t) {
+        if match.action == .autoClose {
+            handleAutoCloseStrike(match: match.label, pid: pid) {
+                // Auto-close tab requires Accessibility trust.
+                guard blockerSettings.accessibilityPermissionGranted,
+                      AXIsProcessTrusted() else {
+                    return
                 }
+                DistractionDetector.closeDistractionTab(pid: pid)
             }
-        } else {
+            return
+        }
+
+        consecutiveShortsStrikes = 0
+        triggerPromptIfNeeded()
+    }
+
+    /// Tracks consecutive auto-close detections and performs configured close action on strike 2.
+    private func handleAutoCloseStrike(match: String, pid: pid_t, closeAction: () -> Void) {
+        consecutiveShortsStrikes += 1
+        if consecutiveShortsStrikes >= 2 {
             consecutiveShortsStrikes = 0
+            if blockerSettings.autoCloseTabsOnSecondStrike {
+                closeAction()
+                lastAutoClosedDistraction = match
+                tabAutoClosedNonce += 1
+            }
         }
 
         triggerPromptIfNeeded()
@@ -1095,6 +1143,16 @@ final class TodoManager: ObservableObject {
 /// Three layers: app identity → CGWindow titles → AXUIElement title.
 enum DistractionDetector {
 
+    enum MatchAction {
+        case reminder
+        case autoClose
+    }
+
+    struct MatchResult {
+        let label: String
+        let action: MatchAction
+    }
+
     // Known browser bundle ID fragments
     static let browserBundleFragments: [String] = [
         "safari", "chrome", "firefox", "arc", "edge", "brave", "opera",
@@ -1112,12 +1170,13 @@ enum DistractionDetector {
     // Returns the first matching blocked reason string, or nil if clean.
     static func checkWindowTitles(
         for pid: pid_t,
-        blockedWebsites: [String],
+        reminderWebsites: [String],
+        autoCloseWebsites: [String],
         blockedKeywords: [String],
         blockYouTubeVideos: Bool,
         isBrowser: Bool,
         debugMode: Bool = false
-    ) -> String? {
+    ) -> MatchResult? {
         let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
         guard let windowList = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
             return nil
@@ -1136,7 +1195,13 @@ enum DistractionDetector {
                 print("[Blocker] Layer 2 checking window: \(rawTitle)")
             }
 
-            if let match = matchTitle(title, blockedWebsites: blockedWebsites, blockedKeywords: blockedKeywords, blockYouTubeVideos: blockYouTubeVideos) {
+            if let match = matchTitle(
+                title,
+                reminderWebsites: reminderWebsites,
+                autoCloseWebsites: autoCloseWebsites,
+                blockedKeywords: blockedKeywords,
+                blockYouTubeVideos: blockYouTubeVideos
+            ) {
                 return match
             }
         }
@@ -1147,11 +1212,12 @@ enum DistractionDetector {
     // More reliable for the exact active tab. Requires Accessibility permission.
     static func checkAXWindowTitle(
         for pid: pid_t,
-        blockedWebsites: [String],
+        reminderWebsites: [String],
+        autoCloseWebsites: [String],
         blockedKeywords: [String],
         blockYouTubeVideos: Bool,
         debugMode: Bool = false
-    ) -> String? {
+    ) -> MatchResult? {
         let appElement = AXUIElementCreateApplication(pid)
         var focusedWindow: AnyObject?
         guard AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &focusedWindow) == .success,
@@ -1166,28 +1232,47 @@ enum DistractionDetector {
         }
 
         let title = rawTitle.lowercased()
-        return matchTitle(title, blockedWebsites: blockedWebsites, blockedKeywords: blockedKeywords, blockYouTubeVideos: blockYouTubeVideos)
+        return matchTitle(
+            title,
+            reminderWebsites: reminderWebsites,
+            autoCloseWebsites: autoCloseWebsites,
+            blockedKeywords: blockedKeywords,
+            blockYouTubeVideos: blockYouTubeVideos
+        )
     }
 
     // ── Shared matching logic ─────────────────────────────────────────────────
     static func matchTitle(
         _ title: String,
-        blockedWebsites: [String],
+        reminderWebsites: [String],
+        autoCloseWebsites: [String],
         blockedKeywords: [String],
         blockYouTubeVideos: Bool
-    ) -> String? {
+    ) -> MatchResult? {
         // YouTube Shorts — always blocked
         if title.contains("shorts") && (title.contains("youtube") || title.contains("yt")) {
-            return "YouTube Shorts"
+            return MatchResult(label: "YouTube Shorts", action: .autoClose)
         }
 
-        // YouTube videos (configurable)
+        // YouTube videos/home/feed (configurable reminder only)
         if blockYouTubeVideos && title.contains("youtube") && !title.contains("youtube music") {
-            return "YouTube"
+            return MatchResult(label: "YouTube", action: .reminder)
         }
 
-        // Blocked websites — match domain fragments against window title
-        for site in blockedWebsites {
+        // Explicit auto-close website list
+        for site in autoCloseWebsites {
+            let needle = site.lowercased()
+                .replacingOccurrences(of: "www.", with: "")
+                .replacingOccurrences(of: "https://", with: "")
+                .replacingOccurrences(of: "http://", with: "")
+            let baseName = needle.components(separatedBy: ".").first ?? needle
+            if title.contains(baseName) || title.contains(needle) {
+                return MatchResult(label: site, action: .autoClose)
+            }
+        }
+
+        // Reminder websites — match domain fragments against window title
+        for site in reminderWebsites {
             let needle = site.lowercased()
                 .replacingOccurrences(of: "www.", with: "")
                 .replacingOccurrences(of: "https://", with: "")
@@ -1195,14 +1280,14 @@ enum DistractionDetector {
             // Extract the base domain name for matching (e.g. "instagram.com" → "instagram")
             let baseName = needle.components(separatedBy: ".").first ?? needle
             if title.contains(baseName) || title.contains(needle) {
-                return site
+                return MatchResult(label: site, action: .reminder)
             }
         }
 
-        // Blocked keywords
+        // Blocked keywords are reminder-only by default.
         for keyword in blockedKeywords {
             if title.contains(keyword.lowercased()) {
-                return keyword
+                return MatchResult(label: keyword, action: .reminder)
             }
         }
 
@@ -1254,6 +1339,11 @@ enum DistractionDetector {
         let cmdWUp = CGEvent(keyboardEventSource: nil, virtualKey: 0x0D, keyDown: false)
         cmdWUp?.flags = .maskCommand
         cmdWUp?.postToPid(pid)
+    }
+
+    static func closeDistractingApp(pid: pid_t) {
+        guard let app = NSRunningApplication(processIdentifier: pid) else { return }
+        _ = app.terminate()
     }
 }
 
@@ -3074,10 +3164,14 @@ struct WindowSettingsView: View {
 
 struct BlockerSettingsView: View {
     @EnvironmentObject var manager: TodoManager
-    @State private var newApp = ""
-    @State private var newSite = ""
+    @State private var newReminderApp = ""
+    @State private var newReminderSite = ""
+    @State private var newAutoCloseApp = ""
+    @State private var newAutoCloseSite = ""
     @State private var newKeyword = ""
     @State private var newPhrase = ""
+    @State private var reminderExpanded = true
+    @State private var autoCloseExpanded = true
 
     var body: some View {
         ScrollView {
@@ -3185,27 +3279,76 @@ struct BlockerSettingsView: View {
                     .padding(4)
                 }
 
-                // ── Four lists side by side ──────────────────────────────────
-                HStack(alignment: .top, spacing: 16) {
-                    blockerListSection(
-                        title: "Blocked Apps",
-                        subtitle: "App names or bundle ID fragments (e.g. Discord, com.hnc.Discord)",
-                        items: manager.blockerSettings.blockedApps,
-                        placeholder: "App name or bundle ID",
-                        newValue: $newApp,
-                        onAdd: { manager.addBlockedApp(newApp); newApp = "" },
-                        onDelete: manager.removeBlockedApp
-                    )
+                GroupBox {
+                    DisclosureGroup(isExpanded: $reminderExpanded) {
+                        HStack(alignment: .top, spacing: 16) {
+                            blockerListSection(
+                                title: "Reminder Apps",
+                                subtitle: "Show reminder popup only for these apps.",
+                                items: manager.blockerSettings.reminderApps,
+                                placeholder: "App name or bundle ID",
+                                newValue: $newReminderApp,
+                                onAdd: { manager.addBlockedApp(newReminderApp); newReminderApp = "" },
+                                onDelete: manager.removeBlockedApp
+                            )
 
-                    blockerListSection(
-                        title: "Blocked Websites",
-                        subtitle: "Domain fragments matched against browser window titles (e.g. instagram.com)",
-                        items: manager.blockerSettings.blockedWebsites,
-                        placeholder: "Domain or URL fragment",
-                        newValue: $newSite,
-                        onAdd: { manager.addBlockedWebsite(newSite); newSite = "" },
-                        onDelete: manager.removeBlockedWebsite
-                    )
+                            blockerListSection(
+                                title: "Reminder Websites",
+                                subtitle: "Show reminder popup only for these websites.",
+                                items: manager.blockerSettings.reminderWebsites,
+                                placeholder: "Domain or URL fragment",
+                                newValue: $newReminderSite,
+                                onAdd: { manager.addBlockedWebsite(newReminderSite); newReminderSite = "" },
+                                onDelete: manager.removeBlockedWebsite
+                            )
+                        }
+                        .padding(.top, 8)
+                    } label: {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Reminder Category")
+                                .font(.headline)
+                            Text("Detected items here show the blocker popup but are not force-closed.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(4)
+                }
+
+                GroupBox {
+                    DisclosureGroup(isExpanded: $autoCloseExpanded) {
+                        HStack(alignment: .top, spacing: 16) {
+                            blockerListSection(
+                                title: "Auto Close Apps",
+                                subtitle: "After two consecutive detections, these apps are terminated.",
+                                items: manager.blockerSettings.autoCloseApps,
+                                placeholder: "App name or bundle ID",
+                                newValue: $newAutoCloseApp,
+                                onAdd: { manager.addAutoCloseApp(newAutoCloseApp); newAutoCloseApp = "" },
+                                onDelete: manager.removeAutoCloseApp
+                            )
+
+                            blockerListSection(
+                                title: "Auto Close Websites",
+                                subtitle: "After two consecutive detections, browser tabs for these sites are closed.",
+                                items: manager.blockerSettings.autoCloseWebsites,
+                                placeholder: "Domain or URL fragment",
+                                newValue: $newAutoCloseSite,
+                                onAdd: { manager.addAutoCloseWebsite(newAutoCloseSite); newAutoCloseSite = "" },
+                                onDelete: manager.removeAutoCloseWebsite
+                            )
+                        }
+                        .padding(.top, 8)
+                    } label: {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Auto Close Category")
+                                .font(.headline)
+                            Text("YouTube Shorts is always auto-close eligible. Configure additional apps/sites here.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(4)
                 }
 
                 HStack(alignment: .top, spacing: 16) {

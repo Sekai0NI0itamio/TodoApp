@@ -11,8 +11,10 @@ struct BlockerSettings: Codable, Equatable {
     var preventWindowClose: Bool
     var autoReopenEnabled: Bool
     var autoReopenMinutes: Int
-    var blockedApps: [String]
-    var blockedWebsites: [String]
+    var reminderApps: [String]
+    var reminderWebsites: [String]
+    var autoCloseApps: [String]
+    var autoCloseWebsites: [String]
     var blockedKeywords: [String]
     var motivationalPhrases: [String]
 
@@ -27,7 +29,7 @@ struct BlockerSettings: Codable, Equatable {
             preventWindowClose: true,
             autoReopenEnabled: true,
             autoReopenMinutes: 5,
-            blockedApps: [
+            reminderApps: [
                 // Chat & social
                 "Discord", "WeChat", "Instagram", "Telegram", "WhatsApp",
                 "Messenger", "Signal", "Slack", "Messages",
@@ -42,7 +44,7 @@ struct BlockerSettings: Codable, Equatable {
                 "Spotify", "Apple Music", "Music", "TV", "Netflix",
                 "Prime Video", "Disney+", "Plex", "VLC", "Twitch"
             ],
-            blockedWebsites: [
+            reminderWebsites: [
                 // Social media
                 "instagram.com", "tiktok.com", "facebook.com", "twitter.com",
                 "x.com", "snapchat.com", "threads.net", "reddit.com",
@@ -54,6 +56,8 @@ struct BlockerSettings: Codable, Equatable {
                 // Other
                 "news.ycombinator.com", "9gag.com", "tumblr.com"
             ],
+            autoCloseApps: [],
+            autoCloseWebsites: [],
             blockedKeywords: [
                 // Short-form video
                 "shorts", "reels", "tiktok", "reel",
@@ -92,14 +96,22 @@ extension BlockerSettings {
         case preventWindowClose
         case autoReopenEnabled
         case autoReopenMinutes
-        case blockedApps
-        case blockedWebsites
+        case reminderApps
+        case reminderWebsites
+        case autoCloseApps
+        case autoCloseWebsites
         case blockedKeywords
         case motivationalPhrases
     }
 
+    enum LegacyCodingKeys: String, CodingKey {
+        case blockedApps
+        case blockedWebsites
+    }
+
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
+        let legacy = try decoder.container(keyedBy: LegacyCodingKeys.self)
         isEnabled = try c.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? false
         appMonitoringPermissionGranted = try c.decodeIfPresent(Bool.self, forKey: .appMonitoringPermissionGranted) ?? false
         accessibilityPermissionGranted = try c.decodeIfPresent(Bool.self, forKey: .accessibilityPermissionGranted) ?? false
@@ -109,8 +121,15 @@ extension BlockerSettings {
         preventWindowClose = try c.decodeIfPresent(Bool.self, forKey: .preventWindowClose) ?? true
         autoReopenEnabled = try c.decodeIfPresent(Bool.self, forKey: .autoReopenEnabled) ?? true
         autoReopenMinutes = try c.decodeIfPresent(Int.self, forKey: .autoReopenMinutes) ?? 5
-        blockedApps = try c.decodeIfPresent([String].self, forKey: .blockedApps) ?? BlockerSettings.default().blockedApps
-        blockedWebsites = try c.decodeIfPresent([String].self, forKey: .blockedWebsites) ?? BlockerSettings.default().blockedWebsites
+        reminderApps = try c.decodeIfPresent([String].self, forKey: .reminderApps)
+            ?? c.decodeIfPresent([String].self, forKey: .autoCloseApps)
+            ?? legacy.decodeIfPresent([String].self, forKey: .blockedApps)
+            ?? BlockerSettings.default().reminderApps
+        reminderWebsites = try c.decodeIfPresent([String].self, forKey: .reminderWebsites)
+            ?? legacy.decodeIfPresent([String].self, forKey: .blockedWebsites)
+            ?? BlockerSettings.default().reminderWebsites
+        autoCloseApps = try c.decodeIfPresent([String].self, forKey: .autoCloseApps) ?? []
+        autoCloseWebsites = try c.decodeIfPresent([String].self, forKey: .autoCloseWebsites) ?? []
         blockedKeywords = try c.decodeIfPresent([String].self, forKey: .blockedKeywords) ?? BlockerSettings.default().blockedKeywords
         motivationalPhrases = try c.decodeIfPresent([String].self, forKey: .motivationalPhrases) ?? BlockerSettings.default().motivationalPhrases
     }
