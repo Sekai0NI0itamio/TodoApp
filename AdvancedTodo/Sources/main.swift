@@ -6,6 +6,7 @@ import UniformTypeIdentifiers
 
 private let mainWindowName = "AdvancedTodoMainWindow"
 private let mainWindowFrameHistoryKey = "AdvancedTodoMainWindow.CustomFrame"
+private let settingsWindowFrameAutosaveName = "AdvancedTodoSettingsWindow"
 private let debugWindowTitle = "AdvancedTodo Debug"
 private let checkpointBrowserNotification = Notification.Name("AdvancedTodo.OpenCheckpointBrowser")
 
@@ -17,6 +18,31 @@ private func isMainAppWindow(_ window: NSWindow) -> Bool {
     if isDebugWindow(window) { return false }
     if window.frameAutosaveName == mainWindowName { return true }
     return window.identifier?.rawValue == mainWindowName
+}
+
+private enum SettingsSelection: String {
+    case blockerGeneral
+    case blockerReminder
+    case blockerAutoClose
+    case window
+    case general
+
+    var blockerItem: BlockerSidebarItem? {
+        switch self {
+        case .blockerGeneral: return .general
+        case .blockerReminder: return .reminder
+        case .blockerAutoClose: return .autoClose
+        case .window, .general: return nil
+        }
+    }
+
+    static func from(blockerItem: BlockerSidebarItem) -> SettingsSelection {
+        switch blockerItem {
+        case .general: return .blockerGeneral
+        case .reminder: return .blockerReminder
+        case .autoClose: return .blockerAutoClose
+        }
+    }
 }
 
 // MARK: - 1. Data Models & View Model
@@ -1830,6 +1856,50 @@ final class BlockerPromptWindowController {
     }
 }
 
+final class SettingsWindowController: NSObject, NSWindowDelegate {
+    static let shared = SettingsWindowController()
+
+    private var window: NSWindow?
+
+    func show(manager: TodoManager) {
+        let rootView = SettingsRootView()
+            .environmentObject(manager)
+
+        let hostingController = NSHostingController(rootView: rootView)
+
+        if let window {
+            window.contentViewController = hostingController
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 980, height: 620),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.identifier = NSUserInterfaceItemIdentifier("AdvancedTodoSettingsWindow")
+        window.title = "Settings"
+        window.contentViewController = hostingController
+        window.isReleasedWhenClosed = false
+        window.delegate = self
+        window.setFrameAutosaveName(settingsWindowFrameAutosaveName)
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+
+        self.window = window
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        if let closedWindow = notification.object as? NSWindow, closedWindow == window {
+            window = nil
+        }
+    }
+}
+
 struct BlockerPromptView: View {
     @ObservedObject var manager: TodoManager
     let onDismiss: () -> Void
@@ -2095,7 +2165,6 @@ struct ContentView: View {
     @State private var pendingImportTargetSidebarKey: String?
     @State private var showingImportActionDialog = false
     @State private var pendingBoardDeletion: NoteBoard?
-    @State private var showingSettingsSheet = false
     @State private var showingCheckpointBrowser = false
     @State private var checkpointRecords: [CheckpointRecord] = []
     @State private var selectedCheckpointID: UUID?
@@ -2254,7 +2323,7 @@ struct ContentView: View {
                         }
 
                         Button {
-                            showingSettingsSheet = true
+                            SettingsWindowController.shared.show(manager: manager)
                         } label: {
                             Image(systemName: "gearshape")
                         }
@@ -2286,10 +2355,6 @@ struct ContentView: View {
             }
             .padding()
             .frame(width: 320)
-        }
-        .sheet(isPresented: $showingSettingsSheet) {
-            SettingsRootView()
-                .environmentObject(manager)
         }
         .sheet(isPresented: Binding(
             get: { pendingBoardDeletion != nil },
@@ -3088,22 +3153,55 @@ struct CheckpointPreviewView: View {
 
 struct SettingsRootView: View {
     @EnvironmentObject var manager: TodoManager
-    @State private var selection: String? = "blocker"
-    @Environment(\.dismiss) private var dismiss
+    @State private var selection: SettingsSelection = .blockerGeneral
+    @State private var blockerExpanded = true
 
     var body: some View {
         NavigationSplitView {
-            List(selection: $selection) {
-                Label("Blocker", systemImage: "shield.lefthalf.filled").tag("blocker")
-                Label("Window", systemImage: "macwindow").tag("window")
-                Label("General", systemImage: "gearshape").tag("general")
+            List {
+                DisclosureGroup(isExpanded: $blockerExpanded) {
+                    settingsSidebarRow(
+                        title: "General Blocker",
+                        systemImage: "square.stack.3d.up",
+                        selection: .blockerGeneral
+                    )
+                    settingsSidebarRow(
+                        title: "Reminder Category",
+                        systemImage: "bell.badge",
+                        selection: .blockerReminder
+                    )
+                    settingsSidebarRow(
+                        title: "Auto Close Category",
+                        systemImage: "bolt.shield",
+                        selection: .blockerAutoClose
+                    )
+                } label: {
+                    Label("Blocker", systemImage: "shield.lefthalf.filled")
+                        .font(.headline)
+                }
+
+                settingsSidebarRow(
+                    title: "Window",
+                    systemImage: "macwindow",
+                    selection: .window
+                )
+                settingsSidebarRow(
+                    title: "General",
+                    systemImage: "gearshape",
+                    selection: .general
+                )
             }
             .navigationTitle("Settings")
         } detail: {
-            if selection == "blocker" {
-                BlockerSettingsView()
+            if let blockerItem = selection.blockerItem {
+                BlockerSettingsView(
+                    selection: Binding(
+                        get: { blockerItem },
+                        set: { selection = .from(blockerItem: $0) }
+                    )
+                )
                     .environmentObject(manager)
-            } else if selection == "window" {
+            } else if selection == .window {
                 WindowSettingsView()
                     .environmentObject(manager)
             } else {
@@ -3118,12 +3216,25 @@ struct SettingsRootView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
         }
-        .toolbar {
-            ToolbarItem(placement: .cancellationAction) {
-                Button("Close") { dismiss() }
+        .frame(minWidth: 820, minHeight: 520)
+    }
+
+    @ViewBuilder
+    private func settingsSidebarRow(title: String, systemImage: String, selection rowSelection: SettingsSelection) -> some View {
+        Button {
+            selection = rowSelection
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: systemImage)
+                    .frame(width: 18)
+                Text(title)
+                Spacer()
             }
+            .padding(.vertical, 4)
+            .contentShape(Rectangle())
         }
-        .frame(minWidth: 760, minHeight: 480)
+        .buttonStyle(.plain)
+        .listRowBackground(selection == rowSelection ? Color.accentColor.opacity(0.16) : Color.clear)
     }
 }
 
@@ -3206,7 +3317,7 @@ struct WindowSettingsView: View {
     }
 }
 
-private enum BlockerSidebarItem: String, CaseIterable, Identifiable {
+enum BlockerSidebarItem: String, CaseIterable, Identifiable {
     case general
     case reminder
     case autoClose
@@ -3248,152 +3359,63 @@ private struct BlockerSectionOffsetPreferenceKey: PreferenceKey {
 
 struct BlockerSettingsView: View {
     @EnvironmentObject var manager: TodoManager
+    @Binding var selection: BlockerSidebarItem
     @State private var newReminderApp = ""
     @State private var newReminderSite = ""
     @State private var newAutoCloseApp = ""
     @State private var newAutoCloseSite = ""
     @State private var newKeyword = ""
     @State private var newPhrase = ""
-    @State private var blockerExpanded = true
-    @State private var contentMode: BlockerSidebarItem = .general
-    @State private var highlightedSidebarItem: BlockerSidebarItem = .general
     @State private var pendingMirrorPrompt: BlockerMirrorPrompt?
     @State private var isProgrammaticScroll = false
 
     var body: some View {
         ScrollViewReader { proxy in
-            HStack(spacing: 0) {
-                blockerSidebar(proxy: proxy)
-                Divider()
-
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 20) {
-                        switch contentMode {
-                        case .general:
-                            blockerOverviewSection
-                                .id(BlockerSidebarItem.general)
-                                .trackBlockerSection(.general)
-                            reminderCategorySection(includeSharedSupport: false)
-                                .id(BlockerSidebarItem.reminder)
-                                .trackBlockerSection(.reminder)
-                            autoCloseCategorySection(includeSharedSupport: false)
-                                .id(BlockerSidebarItem.autoClose)
-                                .trackBlockerSection(.autoClose)
-                            sharedBlockerSupportSection
-                        case .reminder:
-                            reminderCategorySection(includeSharedSupport: true)
-                                .id(BlockerSidebarItem.reminder)
-                        case .autoClose:
-                            autoCloseCategorySection(includeSharedSupport: true)
-                                .id(BlockerSidebarItem.autoClose)
-                        }
-                    }
-                    .padding(20)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    blockerOverviewSection
+                        .id(BlockerSidebarItem.general)
+                        .trackBlockerSection(.general)
+                    reminderCategorySection(includeSharedSupport: false)
+                        .id(BlockerSidebarItem.reminder)
+                        .trackBlockerSection(.reminder)
+                    autoCloseCategorySection(includeSharedSupport: false)
+                        .id(BlockerSidebarItem.autoClose)
+                        .trackBlockerSection(.autoClose)
+                    sharedBlockerSupportSection
                 }
-                .coordinateSpace(name: "BlockerScroll")
-                .background(Color(NSColor.textBackgroundColor).opacity(0.001))
-                .onPreferenceChange(BlockerSectionOffsetPreferenceKey.self) { offsets in
-                    guard contentMode == .general, !isProgrammaticScroll else { return }
-                    let targetY: CGFloat = 28
-                    if let nearest = offsets.min(by: { abs($0.value - targetY) < abs($1.value - targetY) })?.key {
-                        highlightedSidebarItem = nearest
-                    }
-                }
-                .onChange(of: contentMode) { mode in
-                    if mode != .general {
-                        highlightedSidebarItem = mode
-                    }
-                }
-                .onAppear {
-                    highlightedSidebarItem = .general
-                }
-                .animation(.easeInOut(duration: 0.2), value: highlightedSidebarItem)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .toolbar {
-                    ToolbarItemGroup(placement: .automatic) {
-                        if contentMode != .general {
-                            Button("Show Connected View") {
-                                switchBlockerPage(to: .general, proxy: proxy)
-                            }
-                        }
-                    }
-                }
-                .modifier(BlockerMirrorAlertModifier(prompt: $pendingMirrorPrompt))
+                .padding(20)
             }
+            .coordinateSpace(name: "BlockerScroll")
+            .background(Color(NSColor.textBackgroundColor).opacity(0.001))
+            .onPreferenceChange(BlockerSectionOffsetPreferenceKey.self) { offsets in
+                guard selection == .general, !isProgrammaticScroll else { return }
+                let targetY: CGFloat = 28
+                if let nearest = offsets.min(by: { abs($0.value - targetY) < abs($1.value - targetY) })?.key,
+                   selection != nearest {
+                    selection = nearest
+                }
+            }
+            .onChange(of: selection) { item in
+                isProgrammaticScroll = true
+                DispatchQueue.main.async {
+                    proxy.scrollTo(item, anchor: .top)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                        isProgrammaticScroll = false
+                    }
+                }
+            }
+            .onAppear {
+                DispatchQueue.main.async {
+                    proxy.scrollTo(selection, anchor: .top)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                        isProgrammaticScroll = false
+                    }
+                }
+            }
+            .modifier(BlockerMirrorAlertModifier(prompt: $pendingMirrorPrompt))
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    private func blockerSidebar(proxy: ScrollViewProxy) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Blocker")
-                .font(.title3.bold())
-                .padding(.horizontal, 18)
-                .padding(.top, 18)
-
-            DisclosureGroup(isExpanded: $blockerExpanded) {
-                VStack(alignment: .leading, spacing: 6) {
-                    ForEach(BlockerSidebarItem.allCases) { item in
-                        Button {
-                            switchBlockerPage(to: item, proxy: proxy)
-                        } label: {
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text(item.title)
-                                    .font(.headline)
-                                Text(item.subtitle)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 10)
-                            .background(
-                                RoundedRectangle(cornerRadius: 10)
-                                    .fill(sidebarItemIsHighlighted(item) ? Color.accentColor.opacity(0.16) : Color.clear)
-                            )
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .padding(.top, 8)
-            } label: {
-                Label("Focus Blocker", systemImage: "shield.lefthalf.filled")
-                    .font(.headline)
-            }
-            .padding(.horizontal, 18)
-
-            Spacer()
-        }
-        .frame(minWidth: 250, idealWidth: 250, maxWidth: 250, maxHeight: .infinity, alignment: .topLeading)
-        .background(Color(NSColor.controlBackgroundColor))
-    }
-
-    private func sidebarItemIsHighlighted(_ item: BlockerSidebarItem) -> Bool {
-        if contentMode == .general {
-            return highlightedSidebarItem == item
-        }
-        return contentMode == item
-    }
-
-    private func switchBlockerPage(to item: BlockerSidebarItem, proxy: ScrollViewProxy? = nil) {
-        blockerExpanded = true
-        highlightedSidebarItem = item
-
-        if item == .general {
-            contentMode = .general
-        } else {
-            contentMode = item
-        }
-
-        guard let proxy else { return }
-        isProgrammaticScroll = true
-        DispatchQueue.main.async {
-            proxy.scrollTo(item, anchor: .top)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                isProgrammaticScroll = false
-            }
-        }
     }
 
     private var blockerOverviewSection: some View {
