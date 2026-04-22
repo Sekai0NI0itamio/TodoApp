@@ -148,11 +148,23 @@ final class UpdateManager: ObservableObject {
     }
 
     func restartAppNow() {
-        let appURL = Bundle.main.bundleURL
-        NSWorkspace.shared.openApplication(at: appURL, configuration: NSWorkspace.OpenConfiguration()) { _, _ in
+        let script = """
+        #!/bin/bash
+        set -euo pipefail
+
+        APP_PATH="$1"
+
+        sleep 1
+        open -n "$APP_PATH"
+        """
+
+        do {
+            try launchDetachedHelper(named: "advancedtodo-restart.sh", script: script, arguments: [Bundle.main.bundleURL.path])
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
                 NSApp.terminate(nil)
             }
+        } catch {
+            statusMessage = "Restart failed: \(error.localizedDescription)"
         }
     }
 
@@ -271,17 +283,15 @@ final class UpdateManager: ObservableObject {
         rm -rf \"$TARGET_APP\"
         cp -R \"$NEW_APP\" \"$TARGET_APP\"
         xattr -dr com.apple.quarantine \"$TARGET_APP\" 2>/dev/null || true
-        open \"$TARGET_APP\"
+        open -n \"$TARGET_APP\"
         """
 
         do {
-            try script.write(to: scriptURL, atomically: true, encoding: .utf8)
-            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
-
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/bin/bash")
-            process.arguments = [scriptURL.path, stagedUpdateAppURL.path, currentAppURL.path]
-            try process.run()
+            try launchDetachedHelper(
+                named: scriptURL.lastPathComponent,
+                script: script,
+                arguments: [stagedUpdateAppURL.path, currentAppURL.path]
+            )
 
             NSApp.terminate(nil)
         } catch {
@@ -471,6 +481,19 @@ final class UpdateManager: ObservableObject {
             }
         }
         return nil
+    }
+
+    private func launchDetachedHelper(named fileName: String, script: String, arguments: [String]) throws {
+        let scriptURL = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
+        try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/nohup")
+        process.arguments = [scriptURL.path] + arguments
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+        try process.run()
     }
 }
 

@@ -721,78 +721,122 @@ final class TodoManager: ObservableObject {
             print("[Blocker] Accessibility permission granted. Restarting app to apply permission-dependent behavior.")
         }
 
-        let appURL = Bundle.main.bundleURL
-        NSWorkspace.shared.openApplication(at: appURL, configuration: NSWorkspace.OpenConfiguration()) { _, _ in
+        relaunchAppAfterExit(delay: 1.0)
+    }
+
+    private func relaunchAppAfterExit(delay: TimeInterval) {
+        let helperURL = FileManager.default.temporaryDirectory.appendingPathComponent("advancedtodo-relaunch.sh")
+        let script = """
+        #!/bin/bash
+        set -euo pipefail
+
+        APP_PATH="$1"
+        DELAY="$2"
+
+        sleep "$DELAY"
+        open -n "$APP_PATH"
+        """
+
+        do {
+            try script.write(to: helperURL, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: helperURL.path)
+
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/nohup")
+            process.arguments = [helperURL.path, Bundle.main.bundleURL.path, String(delay)]
+            process.standardOutput = Pipe()
+            process.standardError = Pipe()
+            try process.run()
+
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
                 NSApp.terminate(nil)
+            }
+        } catch {
+            if debugModeEnabled {
+                print("[Blocker] Failed to schedule relaunch after accessibility grant: \(error.localizedDescription)")
             }
         }
     }
 
-    func addBlockedApp(_ app: String) {
-        let cleaned = app.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleaned.isEmpty else { return }
-        if !blockerSettings.reminderApps.contains(where: { $0.caseInsensitiveCompare(cleaned) == .orderedSame }) {
-            blockerSettings.reminderApps.append(cleaned)
-        }
+    private func containsBlockerItem(_ item: String, in list: [String]) -> Bool {
+        list.contains(where: { $0.caseInsensitiveCompare(item) == .orderedSame })
+    }
+
+    @discardableResult
+    private func insertBlockerItem(_ item: String, into list: inout [String]) -> String? {
+        let cleaned = item.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty, !containsBlockerItem(cleaned, in: list) else { return nil }
+        list.append(cleaned)
+        return cleaned
+    }
+
+    func containsReminderApp(_ app: String) -> Bool {
+        containsBlockerItem(app.trimmingCharacters(in: .whitespacesAndNewlines), in: blockerSettings.reminderApps)
+    }
+
+    func containsAutoCloseApp(_ app: String) -> Bool {
+        containsBlockerItem(app.trimmingCharacters(in: .whitespacesAndNewlines), in: blockerSettings.autoCloseApps)
+    }
+
+    func containsReminderWebsite(_ website: String) -> Bool {
+        containsBlockerItem(website.trimmingCharacters(in: .whitespacesAndNewlines), in: blockerSettings.reminderWebsites)
+    }
+
+    func containsAutoCloseWebsite(_ website: String) -> Bool {
+        containsBlockerItem(website.trimmingCharacters(in: .whitespacesAndNewlines), in: blockerSettings.autoCloseWebsites)
+    }
+
+    @discardableResult
+    func addBlockedApp(_ app: String) -> String? {
+        insertBlockerItem(app, into: &blockerSettings.reminderApps)
     }
 
     func removeBlockedApp(at offsets: IndexSet) {
         blockerSettings.reminderApps.remove(atOffsets: offsets)
     }
 
-    func addAutoCloseApp(_ app: String) {
-        let cleaned = app.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleaned.isEmpty else { return }
-        if !blockerSettings.autoCloseApps.contains(where: { $0.caseInsensitiveCompare(cleaned) == .orderedSame }) {
-            blockerSettings.autoCloseApps.append(cleaned)
-        }
+    @discardableResult
+    func addAutoCloseApp(_ app: String) -> String? {
+        insertBlockerItem(app, into: &blockerSettings.autoCloseApps)
     }
 
     func removeAutoCloseApp(at offsets: IndexSet) {
         blockerSettings.autoCloseApps.remove(atOffsets: offsets)
     }
 
-    func addBlockedWebsite(_ website: String) {
-        let cleaned = website.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleaned.isEmpty else { return }
-        if !blockerSettings.reminderWebsites.contains(where: { $0.caseInsensitiveCompare(cleaned) == .orderedSame }) {
-            blockerSettings.reminderWebsites.append(cleaned)
-        }
+    @discardableResult
+    func addBlockedWebsite(_ website: String) -> String? {
+        insertBlockerItem(website, into: &blockerSettings.reminderWebsites)
     }
 
     func removeBlockedWebsite(at offsets: IndexSet) {
         blockerSettings.reminderWebsites.remove(atOffsets: offsets)
     }
 
-    func addAutoCloseWebsite(_ website: String) {
-        let cleaned = website.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleaned.isEmpty else { return }
-        if !blockerSettings.autoCloseWebsites.contains(where: { $0.caseInsensitiveCompare(cleaned) == .orderedSame }) {
-            blockerSettings.autoCloseWebsites.append(cleaned)
-        }
+    @discardableResult
+    func addAutoCloseWebsite(_ website: String) -> String? {
+        insertBlockerItem(website, into: &blockerSettings.autoCloseWebsites)
     }
 
     func removeAutoCloseWebsite(at offsets: IndexSet) {
         blockerSettings.autoCloseWebsites.remove(atOffsets: offsets)
     }
 
-    func addBlockedKeyword(_ keyword: String) {
-        let cleaned = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleaned.isEmpty else { return }
-        if !blockerSettings.blockedKeywords.contains(where: { $0.caseInsensitiveCompare(cleaned) == .orderedSame }) {
-            blockerSettings.blockedKeywords.append(cleaned)
-        }
+    @discardableResult
+    func addBlockedKeyword(_ keyword: String) -> String? {
+        insertBlockerItem(keyword, into: &blockerSettings.blockedKeywords)
     }
 
     func removeBlockedKeyword(at offsets: IndexSet) {
         blockerSettings.blockedKeywords.remove(atOffsets: offsets)
     }
 
-    func addMotivationPhrase(_ phrase: String) {
+    @discardableResult
+    func addMotivationPhrase(_ phrase: String) -> String? {
         let cleaned = phrase.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleaned.isEmpty else { return }
+        guard !cleaned.isEmpty else { return nil }
         blockerSettings.motivationalPhrases.append(cleaned)
+        return cleaned
     }
 
     func removeMotivationPhrase(at offsets: IndexSet) {
@@ -3162,6 +3206,46 @@ struct WindowSettingsView: View {
     }
 }
 
+private enum BlockerSidebarItem: String, CaseIterable, Identifiable {
+    case general
+    case reminder
+    case autoClose
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .general: return "General Blocker"
+        case .reminder: return "Reminder Category"
+        case .autoClose: return "Auto Close Category"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .general: return "All blocker sections in one connected page"
+        case .reminder: return "Popup-only apps, sites, and shared rules"
+        case .autoClose: return "Force-close rules plus shared blocker lists"
+        }
+    }
+}
+
+private struct BlockerMirrorPrompt {
+    let id = UUID()
+    let title: String
+    let message: String
+    let confirmTitle: String
+    let action: () -> Void
+}
+
+private struct BlockerSectionOffsetPreferenceKey: PreferenceKey {
+    static var defaultValue: [BlockerSidebarItem: CGFloat] = [:]
+
+    static func reduce(value: inout [BlockerSidebarItem: CGFloat], nextValue: () -> [BlockerSidebarItem: CGFloat]) {
+        value.merge(nextValue(), uniquingKeysWith: { $1 })
+    }
+}
+
 struct BlockerSettingsView: View {
     @EnvironmentObject var manager: TodoManager
     @State private var newReminderApp = ""
@@ -3170,223 +3254,428 @@ struct BlockerSettingsView: View {
     @State private var newAutoCloseSite = ""
     @State private var newKeyword = ""
     @State private var newPhrase = ""
-    @State private var reminderExpanded = true
-    @State private var autoCloseExpanded = true
+    @State private var blockerExpanded = true
+    @State private var contentMode: BlockerSidebarItem = .general
+    @State private var highlightedSidebarItem: BlockerSidebarItem = .general
+    @State private var pendingMirrorPrompt: BlockerMirrorPrompt?
+    @State private var isProgrammaticScroll = false
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-
-                // ── Header ──────────────────────────────────────────────────
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Focus Blocker")
-                        .font(.title2.bold())
-                    Text("When enabled, the app watches which app is in the foreground every 6 seconds. If a distracting app is detected, a full-screen focus reminder appears every 5 minutes showing your pending tasks and a motivational message.")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-
+        ScrollViewReader { proxy in
+            HStack(spacing: 0) {
+                blockerSidebar(proxy: proxy)
                 Divider()
 
-                // ── Master toggles ───────────────────────────────────────────
-                GroupBox {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Toggle("Enable Focus Blocker", isOn: Binding(
-                            get: { manager.blockerSettings.isEnabled },
-                            set: { manager.blockerSettings.isEnabled = $0 }
-                        ))
-                        .font(.headline)
-
-                        Divider()
-
-                        Toggle("App Monitoring Permission Granted", isOn: Binding(
-                            get: { manager.blockerSettings.appMonitoringPermissionGranted },
-                            set: { manager.setBlockerPermissionGranted($0) }
-                        ))
-
-                        Text("Allows reading the frontmost app name and bundle ID via NSWorkspace. No data leaves your device.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-
-                        Divider()
-
-                        HStack(alignment: .top, spacing: 8) {
-                            Toggle("Accessibility Permission Granted", isOn: Binding(
-                                get: { manager.blockerSettings.accessibilityPermissionGranted },
-                                set: { manager.setAccessibilityPermissionGranted($0) }
-                            ))
-                            Button("Open System Settings") {
-                                NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 20) {
+                        switch contentMode {
+                        case .general:
+                            blockerOverviewSection
+                                .id(BlockerSidebarItem.general)
+                                .trackBlockerSection(.general)
+                            reminderCategorySection(includeSharedSupport: false)
+                                .id(BlockerSidebarItem.reminder)
+                                .trackBlockerSection(.reminder)
+                            autoCloseCategorySection(includeSharedSupport: false)
+                                .id(BlockerSidebarItem.autoClose)
+                                .trackBlockerSection(.autoClose)
+                            sharedBlockerSupportSection
+                        case .reminder:
+                            reminderCategorySection(includeSharedSupport: true)
+                                .id(BlockerSidebarItem.reminder)
+                        case .autoClose:
+                            autoCloseCategorySection(includeSharedSupport: true)
+                                .id(BlockerSidebarItem.autoClose)
+                        }
+                    }
+                    .padding(20)
+                }
+                .coordinateSpace(name: "BlockerScroll")
+                .background(Color(NSColor.textBackgroundColor).opacity(0.001))
+                .onPreferenceChange(BlockerSectionOffsetPreferenceKey.self) { offsets in
+                    guard contentMode == .general, !isProgrammaticScroll else { return }
+                    let targetY: CGFloat = 28
+                    if let nearest = offsets.min(by: { abs($0.value - targetY) < abs($1.value - targetY) })?.key {
+                        highlightedSidebarItem = nearest
+                    }
+                }
+                .onChange(of: contentMode) { mode in
+                    if mode != .general {
+                        highlightedSidebarItem = mode
+                    }
+                }
+                .onAppear {
+                    highlightedSidebarItem = .general
+                }
+                .animation(.easeInOut(duration: 0.2), value: highlightedSidebarItem)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .toolbar {
+                    ToolbarItemGroup(placement: .automatic) {
+                        if contentMode != .general {
+                            Button("Show Connected View") {
+                                switchBlockerPage(to: .general, proxy: proxy)
                             }
-                            .font(.caption)
-                        }
-
-                        Text("Optional but recommended. Enables reading the exact focused window title via the Accessibility API — catches browser tabs more reliably. Grant in System Settings → Privacy & Security → Accessibility, then toggle this on.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-
-                        Divider()
-
-                        Toggle("Also block YouTube videos (not just Shorts)", isOn: Binding(
-                            get: { manager.blockerSettings.blockYouTubeVideos },
-                            set: { manager.blockerSettings.blockYouTubeVideos = $0 }
-                        ))
-
-                        Text("When on, any window titled 'YouTube' is treated as a distraction, not just Shorts. YouTube Music is excluded.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-
-                        Divider()
-
-                        Toggle("Auto-close tab on second strike", isOn: Binding(
-                            get: { manager.blockerSettings.autoCloseTabsOnSecondStrike },
-                            set: { manager.blockerSettings.autoCloseTabsOnSecondStrike = $0 }
-                        ))
-
-                        Text("When on, if a shorts-type distraction (YouTube Shorts, TikTok, Instagram Reels, etc.) is detected twice in a row, the browser tab is automatically closed with Cmd+W. Normal YouTube pages (home/feed/videos) only trigger the reminder popup and are not auto-closed. Requires Accessibility permission. Chat apps and standalone apps like Discord or Steam are never auto-closed.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-
-                        Divider()
-
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text("Block Duration")
-                                .font(.headline)
-                            
-                            HStack {
-                                Stepper(value: Binding(
-                                    get: { manager.blockerSettings.blockDurationSeconds },
-                                    set: { manager.blockerSettings.blockDurationSeconds = max(10, $0) }
-                                ), in: 10...600, step: 10) {
-                                    Text("\(manager.blockerSettings.blockDurationSeconds) seconds")
-                                }
-                            }
-                            
-                            Text("How long the blocker prompt stays on screen before you can be interrupted again. Default is 60 seconds (1 minute).")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-
-                        Divider()
-
-                    }
-                    .padding(4)
-                }
-
-                GroupBox {
-                    DisclosureGroup(isExpanded: $reminderExpanded) {
-                        HStack(alignment: .top, spacing: 16) {
-                            blockerListSection(
-                                title: "Reminder Apps",
-                                subtitle: "Show reminder popup only for these apps.",
-                                items: manager.blockerSettings.reminderApps,
-                                placeholder: "App name or bundle ID",
-                                newValue: $newReminderApp,
-                                onAdd: { manager.addBlockedApp(newReminderApp); newReminderApp = "" },
-                                onDelete: manager.removeBlockedApp
-                            )
-
-                            blockerListSection(
-                                title: "Reminder Websites",
-                                subtitle: "Show reminder popup only for these websites.",
-                                items: manager.blockerSettings.reminderWebsites,
-                                placeholder: "Domain or URL fragment",
-                                newValue: $newReminderSite,
-                                onAdd: { manager.addBlockedWebsite(newReminderSite); newReminderSite = "" },
-                                onDelete: manager.removeBlockedWebsite
-                            )
-                        }
-                        .padding(.top, 8)
-                    } label: {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Reminder Category")
-                                .font(.headline)
-                            Text("Detected items here show the blocker popup but are not force-closed.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
                         }
                     }
-                    .padding(4)
                 }
-
-                GroupBox {
-                    DisclosureGroup(isExpanded: $autoCloseExpanded) {
-                        HStack(alignment: .top, spacing: 16) {
-                            blockerListSection(
-                                title: "Auto Close Apps",
-                                subtitle: "After two consecutive detections, these apps are terminated.",
-                                items: manager.blockerSettings.autoCloseApps,
-                                placeholder: "App name or bundle ID",
-                                newValue: $newAutoCloseApp,
-                                onAdd: { manager.addAutoCloseApp(newAutoCloseApp); newAutoCloseApp = "" },
-                                onDelete: manager.removeAutoCloseApp
-                            )
-
-                            blockerListSection(
-                                title: "Auto Close Websites",
-                                subtitle: "After two consecutive detections, browser tabs for these sites are closed.",
-                                items: manager.blockerSettings.autoCloseWebsites,
-                                placeholder: "Domain or URL fragment",
-                                newValue: $newAutoCloseSite,
-                                onAdd: { manager.addAutoCloseWebsite(newAutoCloseSite); newAutoCloseSite = "" },
-                                onDelete: manager.removeAutoCloseWebsite
-                            )
-                        }
-                        .padding(.top, 8)
-                    } label: {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Auto Close Category")
-                                .font(.headline)
-                            Text("YouTube Shorts is always auto-close eligible. Configure additional apps/sites here.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .padding(4)
-                }
-
-                HStack(alignment: .top, spacing: 16) {
-                    blockerListSection(
-                        title: "Blocked Keywords",
-                        subtitle: "Any app whose name or bundle ID contains these words is blocked (e.g. shorts, gaming)",
-                        items: manager.blockerSettings.blockedKeywords,
-                        placeholder: "Keyword",
-                        newValue: $newKeyword,
-                        onAdd: { manager.addBlockedKeyword(newKeyword); newKeyword = "" },
-                        onDelete: manager.removeBlockedKeyword
-                    )
-
-                    blockerListSection(
-                        title: "Motivational Phrases",
-                        subtitle: "These rotate on the focus reminder popup every 7 seconds",
-                        items: manager.blockerSettings.motivationalPhrases,
-                        placeholder: "Add a phrase",
-                        newValue: $newPhrase,
-                        onAdd: { manager.addMotivationPhrase(newPhrase); newPhrase = "" },
-                        onDelete: manager.removeMotivationPhrase
-                    )
-                }
-
-                // ── Personalise note ─────────────────────────────────────────
-                GroupBox("Personalise your blocklist") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        researchRow(icon: "app.badge", text: "Add any game launcher you use that isn't in the list (e.g. Heroic, Lutris, Battle.net, GOG Galaxy).")
-                        researchRow(icon: "globe", text: "Add any social or entertainment site you visit in a browser that isn't already covered.")
-                        researchRow(icon: "quote.bubble", text: "Replace the default motivational phrases with ones that actually resonate with you — they hit harder when they're personal.")
-                        researchRow(icon: "checkmark.shield", text: "Grant Accessibility permission to enable auto-close of distracting tabs on the second strike.")
-                    }
-                    .padding(4)
-                }
+                .modifier(BlockerMirrorAlertModifier(prompt: $pendingMirrorPrompt))
             }
-            .padding(20)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func blockerSidebar(proxy: ScrollViewProxy) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Blocker")
+                .font(.title3.bold())
+                .padding(.horizontal, 18)
+                .padding(.top, 18)
+
+            DisclosureGroup(isExpanded: $blockerExpanded) {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(BlockerSidebarItem.allCases) { item in
+                        Button {
+                            switchBlockerPage(to: item, proxy: proxy)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(item.title)
+                                    .font(.headline)
+                                Text(item.subtitle)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 10)
+                            .background(
+                                RoundedRectangle(cornerRadius: 10)
+                                    .fill(sidebarItemIsHighlighted(item) ? Color.accentColor.opacity(0.16) : Color.clear)
+                            )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.top, 8)
+            } label: {
+                Label("Focus Blocker", systemImage: "shield.lefthalf.filled")
+                    .font(.headline)
+            }
+            .padding(.horizontal, 18)
+
+            Spacer()
+        }
+        .frame(minWidth: 250, idealWidth: 250, maxWidth: 250, maxHeight: .infinity, alignment: .topLeading)
+        .background(Color(NSColor.controlBackgroundColor))
+    }
+
+    private func sidebarItemIsHighlighted(_ item: BlockerSidebarItem) -> Bool {
+        if contentMode == .general {
+            return highlightedSidebarItem == item
+        }
+        return contentMode == item
+    }
+
+    private func switchBlockerPage(to item: BlockerSidebarItem, proxy: ScrollViewProxy? = nil) {
+        blockerExpanded = true
+        highlightedSidebarItem = item
+
+        if item == .general {
+            contentMode = .general
+        } else {
+            contentMode = item
+        }
+
+        guard let proxy else { return }
+        isProgrammaticScroll = true
+        DispatchQueue.main.async {
+            proxy.scrollTo(item, anchor: .top)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                isProgrammaticScroll = false
+            }
+        }
+    }
+
+    private var blockerOverviewSection: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Focus Blocker")
+                    .font(.title2.bold())
+                Text("General Blocker shows every blocker page stitched together. As you scroll through the connected sections, the sidebar follows along so it feels like one continuous setup flow.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Divider()
+
+            GroupBox {
+                VStack(alignment: .leading, spacing: 10) {
+                    Toggle("Enable Focus Blocker", isOn: Binding(
+                        get: { manager.blockerSettings.isEnabled },
+                        set: { manager.blockerSettings.isEnabled = $0 }
+                    ))
+                    .font(.headline)
+
+                    Divider()
+
+                    Toggle("App Monitoring Permission Granted", isOn: Binding(
+                        get: { manager.blockerSettings.appMonitoringPermissionGranted },
+                        set: { manager.setBlockerPermissionGranted($0) }
+                    ))
+
+                    Text("Allows reading the frontmost app name and bundle ID via NSWorkspace. No data leaves your device.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Divider()
+
+                    HStack(alignment: .top, spacing: 8) {
+                        Toggle("Accessibility Permission Granted", isOn: Binding(
+                            get: { manager.blockerSettings.accessibilityPermissionGranted },
+                            set: { manager.setAccessibilityPermissionGranted($0) }
+                        ))
+                        Button("Open System Settings") {
+                            NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
+                        }
+                        .font(.caption)
+                    }
+
+                    Text("Optional but recommended. Enables reading the exact focused window title via the Accessibility API and now relaunches the app with a detached helper once permission becomes available.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Divider()
+
+                    Toggle("Also block YouTube videos (not just Shorts)", isOn: Binding(
+                        get: { manager.blockerSettings.blockYouTubeVideos },
+                        set: { manager.blockerSettings.blockYouTubeVideos = $0 }
+                    ))
+
+                    Text("When on, any window titled \"YouTube\" is treated as a distraction, not just Shorts. YouTube Music is excluded.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Divider()
+
+                    Toggle("Auto-close tab on second strike", isOn: Binding(
+                        get: { manager.blockerSettings.autoCloseTabsOnSecondStrike },
+                        set: { manager.blockerSettings.autoCloseTabsOnSecondStrike = $0 }
+                    ))
+
+                    Text("When on, shorts-style distractions are closed on the second consecutive detection. The Reminder and Auto Close pages below control what gets prompted versus force-closed.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Divider()
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Block Duration")
+                            .font(.headline)
+
+                        Stepper(value: Binding(
+                            get: { manager.blockerSettings.blockDurationSeconds },
+                            set: { manager.blockerSettings.blockDurationSeconds = max(10, $0) }
+                        ), in: 10...600, step: 10) {
+                            Text("\(manager.blockerSettings.blockDurationSeconds) seconds")
+                                .monospacedDigit()
+                        }
+
+                        Text("How long the blocker prompt stays on screen before you can be interrupted again. Default is 60 seconds.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .padding(4)
+            }
+        }
+    }
+
+    private func reminderCategorySection(includeSharedSupport: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 20) {
+            blockerSectionHeader(
+                title: "Reminder Category",
+                description: "Detected items here show the blocker popup but are not force-closed. Adding a reminder item now also offers to mirror it into Auto Close."
+            )
+
+            HStack(alignment: .top, spacing: 16) {
+                blockerListSection(
+                    title: "Reminder Apps",
+                    subtitle: "Show reminder popup only for these apps.",
+                    items: manager.blockerSettings.reminderApps,
+                    placeholder: "App name or bundle ID",
+                    newValue: $newReminderApp,
+                    onAdd: handleReminderAppAdd,
+                    onDelete: manager.removeBlockedApp
+                )
+
+                blockerListSection(
+                    title: "Reminder Websites",
+                    subtitle: "Show reminder popup only for these websites.",
+                    items: manager.blockerSettings.reminderWebsites,
+                    placeholder: "Domain or URL fragment",
+                    newValue: $newReminderSite,
+                    onAdd: handleReminderSiteAdd,
+                    onDelete: manager.removeBlockedWebsite
+                )
+            }
+
+            if includeSharedSupport {
+                sharedBlockerSupportSection
+            }
+        }
+    }
+
+    private func autoCloseCategorySection(includeSharedSupport: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 20) {
+            blockerSectionHeader(
+                title: "Auto Close Category",
+                description: "These are the force-close rules. Apps are terminated after repeated detections and browser tabs are closed on the second strike. Adding an item here can also mirror it into Reminder."
+            )
+
+            HStack(alignment: .top, spacing: 16) {
+                blockerListSection(
+                    title: "Auto Close Apps",
+                    subtitle: "After two consecutive detections, these apps are terminated.",
+                    items: manager.blockerSettings.autoCloseApps,
+                    placeholder: "App name or bundle ID",
+                    newValue: $newAutoCloseApp,
+                    onAdd: handleAutoCloseAppAdd,
+                    onDelete: manager.removeAutoCloseApp
+                )
+
+                blockerListSection(
+                    title: "Auto Close Websites",
+                    subtitle: "After two consecutive detections, browser tabs for these sites are closed.",
+                    items: manager.blockerSettings.autoCloseWebsites,
+                    placeholder: "Domain or URL fragment",
+                    newValue: $newAutoCloseSite,
+                    onAdd: handleAutoCloseSiteAdd,
+                    onDelete: manager.removeAutoCloseWebsite
+                )
+            }
+
+            if includeSharedSupport {
+                sharedBlockerSupportSection
+            }
+        }
+    }
+
+    private var sharedBlockerSupportSection: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            blockerSectionHeader(
+                title: "Shared Blocker Support",
+                description: "This was the floating independent blocker area before. It now stays tied into the blocker categories so the shared lists are available wherever you work."
+            )
+
+            HStack(alignment: .top, spacing: 16) {
+                blockerListSection(
+                    title: "Blocked Keywords",
+                    subtitle: "Any app whose name or bundle ID contains these words is blocked across the reminder and auto-close flows.",
+                    items: manager.blockerSettings.blockedKeywords,
+                    placeholder: "Keyword",
+                    newValue: $newKeyword,
+                    onAdd: {
+                        if manager.addBlockedKeyword(newKeyword) != nil {
+                            newKeyword = ""
+                        }
+                    },
+                    onDelete: manager.removeBlockedKeyword
+                )
+
+                blockerListSection(
+                    title: "Motivational Phrases",
+                    subtitle: "These rotate on the focus reminder popup every 7 seconds.",
+                    items: manager.blockerSettings.motivationalPhrases,
+                    placeholder: "Add a phrase",
+                    newValue: $newPhrase,
+                    onAdd: {
+                        if manager.addMotivationPhrase(newPhrase) != nil {
+                            newPhrase = ""
+                        }
+                    },
+                    onDelete: manager.removeMotivationPhrase
+                )
+            }
+
+            GroupBox("Personalise your blocklist") {
+                VStack(alignment: .leading, spacing: 8) {
+                    researchRow(icon: "app.badge", text: "Add any game launcher you use that is not already covered.")
+                    researchRow(icon: "globe", text: "Add any social or entertainment site you regularly drift toward in a browser.")
+                    researchRow(icon: "arrow.triangle.2.circlepath", text: "When you add a reminder or auto-close item, you can now mirror it into the other category in one step.")
+                    researchRow(icon: "checkmark.shield", text: "Grant Accessibility permission to enable auto-close and automatic relaunch after the permission is accepted.")
+                }
+                .padding(4)
+            }
+        }
+    }
+
+    private func blockerSectionHeader(title: String, description: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.title3.bold())
+            Text(description)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func handleReminderAppAdd() {
+        guard let added = manager.addBlockedApp(newReminderApp) else { return }
+        newReminderApp = ""
+        guard !manager.containsAutoCloseApp(added) else { return }
+        pendingMirrorPrompt = BlockerMirrorPrompt(
+            title: "Also add to Auto Close?",
+            message: "\"\(added)\" was added to Reminder. Do you want to add it to Auto Close too?",
+            confirmTitle: "Add to Auto Close"
+        ) {
+            _ = manager.addAutoCloseApp(added)
+        }
+    }
+
+    private func handleReminderSiteAdd() {
+        guard let added = manager.addBlockedWebsite(newReminderSite) else { return }
+        newReminderSite = ""
+        guard !manager.containsAutoCloseWebsite(added) else { return }
+        pendingMirrorPrompt = BlockerMirrorPrompt(
+            title: "Also add to Auto Close?",
+            message: "\"\(added)\" was added to Reminder Websites. Do you want to add it to Auto Close Websites too?",
+            confirmTitle: "Add to Auto Close"
+        ) {
+            _ = manager.addAutoCloseWebsite(added)
+        }
+    }
+
+    private func handleAutoCloseAppAdd() {
+        guard let added = manager.addAutoCloseApp(newAutoCloseApp) else { return }
+        newAutoCloseApp = ""
+        guard !manager.containsReminderApp(added) else { return }
+        pendingMirrorPrompt = BlockerMirrorPrompt(
+            title: "Also add to Reminder?",
+            message: "\"\(added)\" was added to Auto Close. Do you want it to show blocker reminders too?",
+            confirmTitle: "Add to Reminder"
+        ) {
+            _ = manager.addBlockedApp(added)
+        }
+    }
+
+    private func handleAutoCloseSiteAdd() {
+        guard let added = manager.addAutoCloseWebsite(newAutoCloseSite) else { return }
+        newAutoCloseSite = ""
+        guard !manager.containsReminderWebsite(added) else { return }
+        pendingMirrorPrompt = BlockerMirrorPrompt(
+            title: "Also add to Reminder?",
+            message: "\"\(added)\" was added to Auto Close Websites. Do you want it to also trigger the blocker reminder?",
+            confirmTitle: "Add to Reminder"
+        ) {
+            _ = manager.addBlockedWebsite(added)
+        }
     }
 
     @ViewBuilder
@@ -3416,14 +3705,18 @@ struct BlockerSettingsView: View {
                     .onDelete(perform: onDelete)
                 }
                 .listStyle(.bordered)
-                .frame(minHeight: 120, maxHeight: 200)
+                .frame(minHeight: 150, maxHeight: 220)
 
                 HStack {
                     TextField(placeholder, text: newValue)
                         .textFieldStyle(.roundedBorder)
-                        .onSubmit { if !newValue.wrappedValue.trimmingCharacters(in: .whitespaces).isEmpty { onAdd() } }
+                        .onSubmit {
+                            if !newValue.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                onAdd()
+                            }
+                        }
                     Button("Add") { onAdd() }
-                        .disabled(newValue.wrappedValue.trimmingCharacters(in: .whitespaces).isEmpty)
+                        .disabled(newValue.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
         }
@@ -3440,6 +3733,47 @@ struct BlockerSettingsView: View {
                 .font(.subheadline)
                 .fixedSize(horizontal: false, vertical: true)
         }
+    }
+}
+
+private struct BlockerMirrorAlertModifier: ViewModifier {
+    @Binding var prompt: BlockerMirrorPrompt?
+
+    func body(content: Content) -> some View {
+        content.alert(
+            prompt?.title ?? "",
+            isPresented: Binding(
+                get: { prompt != nil },
+                set: { isPresented in
+                    if !isPresented {
+                        prompt = nil
+                    }
+                }
+            )
+        ) {
+            Button(prompt?.confirmTitle ?? "Add") {
+                prompt?.action()
+                prompt = nil
+            }
+            Button("Not Now", role: .cancel) {
+                prompt = nil
+            }
+        } message: {
+            Text(prompt?.message ?? "")
+        }
+    }
+}
+
+private extension View {
+    func trackBlockerSection(_ section: BlockerSidebarItem) -> some View {
+        background(
+            GeometryReader { geometry in
+                Color.clear.preference(
+                    key: BlockerSectionOffsetPreferenceKey.self,
+                    value: [section: geometry.frame(in: .named("BlockerScroll")).minY]
+                )
+            }
+        )
     }
 }
 
