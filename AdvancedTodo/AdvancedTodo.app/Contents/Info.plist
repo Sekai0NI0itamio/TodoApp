@@ -2,27 +2,33 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key>
-    <string>AdvancedTodo</string>
-    <key>CFBundleDisplayName</key>
-    <string>AdvancedTodo</string>
-    <key>CFBundleIdentifier</key>
-    <string>com.example.AdvancedTodo</string>
-    <key>CFBundleExecutable</key>
-    <string>AdvancedTodo</string>
-    <key>CFBundleIconFile</key>
-    <string>Todo.icns</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>12.0</string>
-    <key>Author</key>
-    <string>Itamio Pupmann</string>
-    <key>RealName</key>
-    <string>Steven Novak</string>
-    <key>Organization</key>
-    <string>AsdUnionTch</string>
-    <key>Description</key>
-    <string>An organization dedicated to providing essential tools for individuals who seek to become entrepeneurs, in which this app ensures that whatever tasks you have you will not forget.</string>
+	<key>Author</key>
+	<string>Itamio Pupmann</string>
+	<key>CFBundleDisplayName</key>
+	<string>AdvancedTodo</string>
+	<key>CFBundleExecutable</key>
+	<string>AdvancedTodo</string>
+	<key>CFBundleIconFile</key>
+	<string>Todo.icns</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.example.AdvancedTodo</string>
+	<key>CFBundleName</key>
+	<string>AdvancedTodo</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>3</string>
+	<key>Description</key>
+	<string>An organization dedicated to providing essential tools for individuals who seek to become entrepeneurs, in which this app ensures that whatever tasks you have you will not forget.</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>12.0</string>
+	<key>Organization</key>
+	<string>AsdUnionTch</string>
+	<key>RealName</key>
+	<string>Steven Novak</string>
+	<key>UpdateRepo</key>
+	<string>Sekai0NI0itamio/TodoApp</string>
 </dict>
 </plist>

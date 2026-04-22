@@ -1,0 +1,54 @@
+name: Build And Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version number (example: 1.2.0)"
+        required: true
+        type: string
+      changelog:
+        description: "Release changelog / notes"
+        required: true
+        type: string
+
+jobs:
+  release:
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Update app version in plist
+        run: |
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${{ inputs.version }}" AdvancedTodo/Info.plist
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${{ github.run_number }}" AdvancedTodo/Info.plist
+
+      - name: Build app
+        run: |
+          cd AdvancedTodo
+          chmod +x build.sh
+          ./build.sh
+
+      - name: Package release zip
+        run: |
+          cd AdvancedTodo
+          ditto -c -k --sequesterRsrc --keepParent AdvancedTodo.app AdvancedTodo-${{ inputs.version }}.zip
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ inputs.version }}
+          name: AdvancedTodo v${{ inputs.version }}
+          body: |
+            Version: ${{ inputs.version }}
+
+            Changenotes:
+            ${{ inputs.changelog }}
+          files: |
+            AdvancedTodo/AdvancedTodo-${{ inputs.version }}.zip

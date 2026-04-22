@@ -34,11 +34,16 @@ iconutil -c icns "$ICONSET_DIR" -o "$ICON_FILE"
 # Refresh Finder's view of the app bundle icon.
 touch "$APP_DIR"
 
-# Compile Swift source into the executable inside the app bundle
-# Use -parse-as-library so @main attribute works in this context
-xcrun --sdk macosx swiftc $TARGET -parse-as-library Sources/main.swift -o "$BIN_DIR/$APP_NAME" -framework Cocoa -framework SwiftUI
+# Compile all Swift source files into the executable inside the app bundle.
+# Use -parse-as-library so @main attribute works in this context.
+SOURCE_FILES=$(find Sources -name '*.swift' | sort)
+xcrun --sdk macosx swiftc $TARGET -parse-as-library $SOURCE_FILES -o "$BIN_DIR/$APP_NAME" -framework Cocoa -framework SwiftUI
 
 # Copy Info.plist into bundle
 cp Info.plist "$PLIST"
+
+# Ensure a consistent signature for distributed builds.
+# This avoids broken-signature errors like "app is damaged" after download.
+codesign --force --deep --sign - "$APP_DIR"
 
 echo "Build complete: $APP_DIR"

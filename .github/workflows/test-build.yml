@@ -1,0 +1,35 @@
+name: Test Build
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build app
+        run: |
+          cd AdvancedTodo
+          chmod +x build.sh
+          ./build.sh
+
+      - name: Package build artifact
+        run: |
+          cd AdvancedTodo
+          ditto -c -k --sequesterRsrc --keepParent AdvancedTodo.app AdvancedTodo-test-build.zip
+
+      - name: Upload test build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AdvancedTodo-test-build
+          path: AdvancedTodo/AdvancedTodo-test-build.zip

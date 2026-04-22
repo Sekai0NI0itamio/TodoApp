@@ -42,14 +42,16 @@ func roundedImage(from image: NSImage, size: CGFloat) -> NSImage? {
     }
 
     let rect = CGRect(origin: .zero, size: targetSize)
-    let inset = size * 0.14
-    let contentRect = rect.insetBy(dx: inset, dy: inset)
+    let radius = size * 0.223
+    let maskPath = CGPath(roundedRect: rect, cornerWidth: radius, cornerHeight: radius, transform: nil)
 
     context.setAllowsAntialiasing(true)
     context.setShouldAntialias(true)
 
     context.saveGState()
-    image.draw(in: contentRect, from: CGRect(origin: .zero, size: image.size), operation: .sourceOver, fraction: 1.0)
+    context.addPath(maskPath)
+    context.clip()
+    image.draw(in: rect, from: CGRect(origin: .zero, size: image.size), operation: .sourceOver, fraction: 1.0)
     context.restoreGState()
 
     output.unlockFocus()
