@@ -3522,6 +3522,174 @@ enum BlockerSidebarItem: String, CaseIterable, Identifiable {
     }
 }
 
+// MARK: - Delete Key Handler (NSViewRepresentable for keyboard Delete in lists)
+
+/// Invisible NSView that intercepts the Delete/Backspace key and calls a closure.
+/// Used as a .background() on List views where .onKeyPress is unavailable (< macOS 14).
+struct DeleteKeyHandler: NSViewRepresentable {
+    let onDelete: () -> Void
+
+    func makeNSView(context: Context) -> DeleteKeyNSView {
+        let view = DeleteKeyNSView()
+        view.onDelete = onDelete
+        return view
+    }
+
+    func updateNSView(_ nsView: DeleteKeyNSView, context: Context) {
+        nsView.onDelete = onDelete
+    }
+}
+
+class DeleteKeyNSView: NSView {
+    var onDelete: (() -> Void)?
+
+    override var acceptsFirstResponder: Bool { true }
+
+    override func keyDown(with event: NSEvent) {
+        // Delete (0x33) or Forward Delete (0x75)
+        if event.keyCode == 0x33 || event.keyCode == 0x75 {
+            onDelete?()
+        } else {
+            super.keyDown(with: event)
+        }
+    }
+}
+
+// MARK: - Blocker List Section (macOS-native selection + delete)
+
+/// A reusable list section used throughout the blocker settings.
+/// Supports click-to-select, Delete key, toolbar Delete button, and right-click context menu.
+struct BlockerListSectionView: View {
+    let title: String
+    let subtitle: String
+    let items: [String]
+    let placeholder: String
+    @Binding var newValue: String
+    let onAdd: () -> Void
+    let onDelete: (IndexSet) -> Void
+    let onReset: (() -> Void)?
+    let onSelectApp: (() -> Void)?
+
+    @State private var selectedItem: String? = nil
+
+    init(
+        title: String,
+        subtitle: String,
+        items: [String],
+        placeholder: String,
+        newValue: Binding<String>,
+        onAdd: @escaping () -> Void,
+        onDelete: @escaping (IndexSet) -> Void,
+        onReset: (() -> Void)? = nil,
+        onSelectApp: (() -> Void)? = nil
+    ) {
+        self.title = title
+        self.subtitle = subtitle
+        self.items = items
+        self.placeholder = placeholder
+        self._newValue = newValue
+        self.onAdd = onAdd
+        self.onDelete = onDelete
+        self.onReset = onReset
+        self.onSelectApp = onSelectApp
+    }
+
+    private func deleteSelected() {
+        guard let selected = selectedItem,
+              let idx = items.firstIndex(of: selected) else { return }
+        selectedItem = nil
+        onDelete(IndexSet(integer: idx))
+    }
+
+    var body: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 8) {
+                // Header row
+                HStack(alignment: .top) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(title)
+                            .font(.headline)
+                        Text(subtitle)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer()
+                    if selectedItem != nil {
+                        Button(role: .destructive) {
+                            deleteSelected()
+                        } label: {
+                            Label("Remove", systemImage: "trash")
+                                .font(.caption)
+                        }
+                        .help("Remove selected item")
+                    }
+                    if let onReset {
+                        Button("Reset", action: onReset)
+                            .font(.caption)
+                    }
+                }
+
+                // List with selection
+                List(selection: $selectedItem) {
+                    ForEach(items, id: \.self) { item in
+                        Text(item)
+                            .font(.subheadline)
+                            .tag(item)
+                            .contextMenu {
+                                Button(role: .destructive) {
+                                    if let idx = items.firstIndex(of: item) {
+                                        onDelete(IndexSet(integer: idx))
+                                        if selectedItem == item { selectedItem = nil }
+                                    }
+                                } label: {
+                                    Label("Remove \"\(item)\"", systemImage: "trash")
+                                }
+                            }
+                    }
+                }
+                .listStyle(.bordered)
+                .frame(minHeight: 150, maxHeight: 220)
+                // Handle keyboard Delete / Backspace (macOS 14+)
+                .background(
+                    DeleteKeyHandler(onDelete: deleteSelected)
+                )
+                .onChange(of: items) { _ in
+                    // Clear selection if the selected item was removed
+                    if let sel = selectedItem, !items.contains(sel) {
+                        selectedItem = nil
+                    }
+                }
+
+                // Hint text when nothing is selected
+                if !items.isEmpty && selectedItem == nil {
+                    Text("Click an item to select it, then press Delete or use the trash button to remove it.")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+
+                // Add row
+                HStack {
+                    TextField(placeholder, text: $newValue)
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit {
+                            if !newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                onAdd()
+                            }
+                        }
+                    if let onSelectApp {
+                        Button("Select App") { onSelectApp() }
+                            .help("Browse Applications folder to pick an app")
+                    }
+                    Button("Add") { onAdd() }
+                        .disabled(newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity)
+    }
+}
+
 private struct BlockerMirrorPrompt {
     let id = UUID()
     let title: String
@@ -4030,52 +4198,17 @@ struct BlockerSettingsView: View {
         onReset: (() -> Void)? = nil,
         onSelectApp: (() -> Void)? = nil
     ) -> some View {
-        GroupBox {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(alignment: .top) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(title)
-                            .font(.headline)
-                        Text(subtitle)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    Spacer()
-                    if let onReset {
-                        Button("Reset", action: onReset)
-                            .font(.caption)
-                    }
-                }
-
-                List {
-                    ForEach(items, id: \.self) { item in
-                        Text(item)
-                            .font(.subheadline)
-                    }
-                    .onDelete(perform: onDelete)
-                }
-                .listStyle(.bordered)
-                .frame(minHeight: 150, maxHeight: 220)
-
-                HStack {
-                    TextField(placeholder, text: newValue)
-                        .textFieldStyle(.roundedBorder)
-                        .onSubmit {
-                            if !newValue.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                                onAdd()
-                            }
-                        }
-                    if let onSelectApp {
-                        Button("Select App") { onSelectApp() }
-                            .help("Browse Applications folder to pick an app")
-                    }
-                    Button("Add") { onAdd() }
-                        .disabled(newValue.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
-            }
-        }
-        .frame(maxWidth: .infinity)
+        BlockerListSectionView(
+            title: title,
+            subtitle: subtitle,
+            items: items,
+            placeholder: placeholder,
+            newValue: newValue,
+            onAdd: onAdd,
+            onDelete: onDelete,
+            onReset: onReset,
+            onSelectApp: onSelectApp
+        )
     }
 
     @ViewBuilder
