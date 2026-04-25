@@ -1776,7 +1776,8 @@ struct AdvancedTodoApp: App {
                     }
                     if !didAutoCheckUpdatesOnLaunch {
                         didAutoCheckUpdatesOnLaunch = true
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                        // Wait 3 s so the window is fully visible before showing any update prompt
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
                             updater.checkForUpdates(showSheetWhileChecking: false, showPromptWhenUpdateFound: true)
                         }
                     }

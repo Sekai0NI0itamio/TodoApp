@@ -67,10 +67,26 @@ final class UpdateManager: ObservableObject {
     @Published var canRestartAfterRestore = false
 
     private let repo: String
+    private var hourlyUpdateTimer: Timer?
 
     init(repo: String? = Bundle.main.object(forInfoDictionaryKey: "UpdateRepo") as? String) {
         self.repo = repo ?? "Sekai0NI0itamio/TodoApp"
         refreshBackups()
+        startHourlyUpdateTimer()
+    }
+
+    deinit {
+        hourlyUpdateTimer?.invalidate()
+    }
+
+    /// Starts a repeating timer that silently checks for updates every hour.
+    private func startHourlyUpdateTimer() {
+        hourlyUpdateTimer?.invalidate()
+        hourlyUpdateTimer = Timer.scheduledTimer(withTimeInterval: 3600, repeats: true) { [weak self] _ in
+            self?.checkForUpdates(showSheetWhileChecking: false, showPromptWhenUpdateFound: true)
+        }
+        // Keep the timer firing even when the run loop is busy (e.g. tracking menus)
+        RunLoop.main.add(hourlyUpdateTimer!, forMode: .common)
     }
 
     func refreshBackups() {
@@ -301,7 +317,9 @@ final class UpdateManager: ObservableObject {
 
     private func fetchLatestUpdateInfo() async throws -> AppUpdateInfo? {
         let url = URL(string: "https://api.github.com/repos/\(repo)/releases")!
-        let (data, _) = try await URLSession.shared.data(from: url)
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 30
+        let (data, _) = try await URLSession.shared.data(for: request)
         let releases = try JSONDecoder().decode([GitHubRelease].self, from: data)
 
         guard let release = releases.first(where: { !$0.draft && !$0.prerelease }) else {
