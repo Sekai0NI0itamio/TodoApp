@@ -876,7 +876,6 @@ final class TodoManager: ObservableObject {
         let defaults = BlockerSettings.default()
         blockerSettings.isEnabled = defaults.isEnabled
         blockerSettings.blockYouTubeVideos = defaults.blockYouTubeVideos
-        blockerSettings.autoCloseTabsOnSecondStrike = defaults.autoCloseTabsOnSecondStrike
         blockerSettings.blockDurationSeconds = defaults.blockDurationSeconds
     }
 
@@ -913,6 +912,7 @@ final class TodoManager: ObservableObject {
         let defaults = BlockerSettings.default()
         blockerSettings.autoCloseApps = defaults.autoCloseApps
         blockerSettings.autoCloseWebsites = defaults.autoCloseWebsites
+        blockerSettings.autoCloseEnabled = defaults.autoCloseEnabled
     }
 
     func resetBlockedKeywordsToDefault() {
@@ -1159,7 +1159,7 @@ final class TodoManager: ObservableObject {
         consecutiveShortsStrikes += 1
         if consecutiveShortsStrikes >= 2 {
             consecutiveShortsStrikes = 0
-            if blockerSettings.autoCloseTabsOnSecondStrike {
+            if blockerSettings.autoCloseEnabled {
                 closeAction()
                 lastAutoClosedDistraction = match
                 tabAutoClosedNonce += 1
@@ -1484,11 +1484,6 @@ enum DistractionDetector {
             }
         }
 
-        // YouTube Shorts — always blocked
-        if title.contains("shorts") && (title.contains("youtube") || title.contains("yt")) {
-            return MatchResult(label: "YouTube Shorts", action: .autoClose)
-        }
-
         // YouTube videos/home/feed (configurable reminder only)
         if blockYouTubeVideos && title.contains("youtube") && !title.contains("youtube music") {
             return MatchResult(label: "YouTube", action: .reminder)
@@ -1500,8 +1495,15 @@ enum DistractionDetector {
                 .replacingOccurrences(of: "www.", with: "")
                 .replacingOccurrences(of: "https://", with: "")
                 .replacingOccurrences(of: "http://", with: "")
-            let baseName = needle.components(separatedBy: ".").first ?? needle
-            if title.contains(baseName) || title.contains(needle) {
+            // For path-based entries like "youtube.com/shorts", check each path segment too
+            let pathParts = needle.components(separatedBy: "/")
+            let domainPart = pathParts.first ?? needle
+            let baseName = domainPart.components(separatedBy: ".").first ?? domainPart
+            // Match if title contains the full needle, the domain, or all path segments
+            let allPartsMatch = pathParts.allSatisfy { part in
+                part.isEmpty || title.contains(part)
+            }
+            if title.contains(needle) || allPartsMatch || title.contains(baseName) {
                 return MatchResult(label: site, action: .autoClose)
             }
         }
@@ -3673,18 +3675,6 @@ struct BlockerSettingsView: View {
 
                     Divider()
 
-                    Toggle("Auto-close tab on second strike", isOn: Binding(
-                        get: { manager.blockerSettings.autoCloseTabsOnSecondStrike },
-                        set: { manager.blockerSettings.autoCloseTabsOnSecondStrike = $0 }
-                    ))
-
-                    Text("When on, shorts-style distractions are closed on the second consecutive detection. The Reminder and Auto Close pages below control what gets prompted versus force-closed.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                    Divider()
-
                     VStack(alignment: .leading, spacing: 6) {
                         Text("Block Duration")
                             .font(.headline)
@@ -3755,17 +3745,39 @@ struct BlockerSettingsView: View {
 
     private func autoCloseCategorySection(includeSharedSupport: Bool) -> some View {
         VStack(alignment: .leading, spacing: 20) {
-            blockerSectionHeader(
-                title: "Auto Close Category",
-                description: "These are the force-close rules. Apps are terminated after repeated detections and browser tabs are closed on the second strike. Adding an item here can also mirror it into Reminder.",
-                resetTitle: "Reset Auto Close",
-                onReset: manager.resetAutoCloseCategoryToDefault
-            )
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Auto Close Category")
+                        .font(.title3.bold())
+                    Text("Items here are force-closed on the second consecutive detection. Apps are terminated; browser tabs are closed with Cmd+W. YouTube Shorts and other short-form sites are included by default.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer()
+                Button("Reset Auto Close") {
+                    manager.resetAutoCloseCategoryToDefault()
+                }
+            }
+
+            GroupBox {
+                Toggle("Enable Auto Close", isOn: Binding(
+                    get: { manager.blockerSettings.autoCloseEnabled },
+                    set: { manager.blockerSettings.autoCloseEnabled = $0 }
+                ))
+                .font(.headline)
+
+                Text("When off, items in this list still trigger the reminder popup but are never force-closed or terminated.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 4)
+            }
 
             HStack(alignment: .top, spacing: 16) {
                 blockerListSection(
                     title: "Auto Close Apps",
-                    subtitle: "After two consecutive detections, these apps are terminated.",
+                    subtitle: "After two consecutive detections, these apps are terminated. Requires Accessibility permission.",
                     items: manager.blockerSettings.autoCloseApps,
                     placeholder: "App name or bundle ID",
                     newValue: $newAutoCloseApp,
@@ -3782,7 +3794,7 @@ struct BlockerSettingsView: View {
 
                 blockerListSection(
                     title: "Auto Close Websites",
-                    subtitle: "After two consecutive detections, browser tabs for these sites are closed.",
+                    subtitle: "Browser tabs for these sites are closed on the second consecutive detection. YouTube Shorts, TikTok, and other short-form sites are included by default.",
                     items: manager.blockerSettings.autoCloseWebsites,
                     placeholder: "Domain or URL fragment",
                     newValue: $newAutoCloseSite,

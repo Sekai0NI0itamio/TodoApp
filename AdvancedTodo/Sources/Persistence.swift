@@ -15,6 +15,8 @@ struct BlockerSettings: Codable, Equatable {
     var reminderWebsites: [String]
     var autoCloseApps: [String]
     var autoCloseWebsites: [String]
+    /// Master toggle for the auto-close feature. When off, detections still show the reminder but never force-close anything.
+    var autoCloseEnabled: Bool
     var blockedKeywords: [String]
     var motivationalPhrases: [String]
     /// Apps whitelisted from ALL blocking — never trigger reminder or auto-close.
@@ -95,7 +97,20 @@ struct BlockerSettings: Codable, Equatable {
                 "boardgamearena.com", "tabletopia.com"
             ],
             autoCloseApps: [],
-            autoCloseWebsites: [],
+            autoCloseWebsites: [
+                // YouTube Shorts — always auto-close
+                "youtube.com/shorts",
+                // Short-form video & social feeds
+                "tiktok.com", "instagram.com/reels", "instagram.com",
+                "snapchat.com", "reddit.com", "twitter.com", "x.com",
+                "facebook.com", "threads.net", "tumblr.com",
+                // Live streaming
+                "twitch.tv",
+                // Video streaming
+                "netflix.com", "primevideo.com", "disneyplus.com",
+                "hulu.com", "9gag.com"
+            ],
+            autoCloseEnabled: true,
             blockedKeywords: [
                 // Short-form video
                 "shorts", "reels", "tiktok", "reel",
@@ -146,6 +161,7 @@ extension BlockerSettings {
         case reminderWebsites
         case autoCloseApps
         case autoCloseWebsites
+        case autoCloseEnabled
         case blockedKeywords
         case motivationalPhrases
         case whitelistedApps
@@ -177,7 +193,8 @@ extension BlockerSettings {
             ?? legacy.decodeIfPresent([String].self, forKey: .blockedWebsites)
             ?? BlockerSettings.default().reminderWebsites
         autoCloseApps = try c.decodeIfPresent([String].self, forKey: .autoCloseApps) ?? []
-        autoCloseWebsites = try c.decodeIfPresent([String].self, forKey: .autoCloseWebsites) ?? []
+        autoCloseWebsites = try c.decodeIfPresent([String].self, forKey: .autoCloseWebsites) ?? BlockerSettings.default().autoCloseWebsites
+        autoCloseEnabled = try c.decodeIfPresent(Bool.self, forKey: .autoCloseEnabled) ?? true
         blockedKeywords = try c.decodeIfPresent([String].self, forKey: .blockedKeywords) ?? BlockerSettings.default().blockedKeywords
         motivationalPhrases = try c.decodeIfPresent([String].self, forKey: .motivationalPhrases) ?? BlockerSettings.default().motivationalPhrases
         whitelistedApps = try c.decodeIfPresent([String].self, forKey: .whitelistedApps) ?? BlockerSettings.default().whitelistedApps
