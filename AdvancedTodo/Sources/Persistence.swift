@@ -17,6 +17,10 @@ struct BlockerSettings: Codable, Equatable {
     var autoCloseWebsites: [String]
     var blockedKeywords: [String]
     var motivationalPhrases: [String]
+    /// Apps whitelisted from ALL blocking — never trigger reminder or auto-close.
+    var whitelistedApps: [String]
+    /// Websites whitelisted from ALL blocking — never trigger reminder or auto-close.
+    var whitelistedWebsites: [String]
 
     static func `default`() -> BlockerSettings {
         BlockerSettings(
@@ -54,7 +58,41 @@ struct BlockerSettings: Codable, Equatable {
                 // Chat
                 "discord.com", "web.whatsapp.com", "web.telegram.org",
                 // Other
-                "news.ycombinator.com", "9gag.com", "tumblr.com"
+                "news.ycombinator.com", "9gag.com", "tumblr.com",
+                // Gaming storefronts & launchers
+                "store.steampowered.com", "steamcommunity.com", "steampowered.com",
+                "epicgames.com", "gog.com", "battle.net", "blizzard.com",
+                "roblox.com", "minecraft.net", "mojang.com",
+                "leagueoflegends.com", "valorant.com", "playvalorant.com",
+                "ea.com", "origin.com", "ubisoft.com", "uplay.com",
+                "xbox.com", "xboxlive.com",
+                "itch.io", "gamesplanet.com", "greenmangaming.com",
+                "humblebundle.com", "fanatical.com",
+                "psnow.com", "playstation.com",
+                // Gaming news & wikis
+                "gamespot.com", "ign.com", "kotaku.com", "polygon.com",
+                "pcgamer.com", "rockpapershotgun.com", "eurogamer.net",
+                "gamefaqs.com", "fandom.com",
+                // Browser / casual games
+                "miniclip.com", "poki.com", "crazygames.com", "y8.com",
+                "friv.com", "addictinggames.com", "kongregate.com",
+                "newgrounds.com", "armorgames.com",
+                "coolmathgames.com", "coolmath-games.com",
+                "agame.com", "gameflare.com", "silvergames.com",
+                "kizi.com", "lagged.com", "gamedistribution.com",
+                "unblockedgames.world", "unblockedgames66.com",
+                // .io multiplayer games
+                "1v1.lol", "shellshock.io", "krunker.io", "slither.io",
+                "agar.io", "diep.io", "moomoo.io", "zombs.io",
+                "surviv.io", "warbrokers.io", "lordz.io",
+                // MMOs & online games
+                "runescape.com", "oldschool.runescape.com",
+                "worldofwarcraft.com", "wowhead.com",
+                "genshin.hoyoverse.com", "hoyoverse.com", "mihoyo.com",
+                "fortnite.com",
+                // Board / strategy games
+                "chess.com", "lichess.org",
+                "boardgamearena.com", "tabletopia.com"
             ],
             autoCloseApps: [],
             autoCloseWebsites: [],
@@ -79,7 +117,15 @@ struct BlockerSettings: Codable, Equatable {
                 "Close the tab. Open the task.",
                 "Your future self is watching. Make them proud.",
                 "One focused hour beats ten distracted ones."
-            ]
+            ],
+            whitelistedApps: [
+                // Microsoft productivity apps — never blocked
+                "Microsoft Word", "Microsoft Excel", "Microsoft PowerPoint",
+                "Microsoft Outlook", "Microsoft Teams", "Microsoft OneNote",
+                "Microsoft Edge", "OneDrive", "Microsoft To Do",
+                "Visual Studio Code", "Visual Studio"
+            ],
+            whitelistedWebsites: []
         )
     }
 }
@@ -102,6 +148,8 @@ extension BlockerSettings {
         case autoCloseWebsites
         case blockedKeywords
         case motivationalPhrases
+        case whitelistedApps
+        case whitelistedWebsites
     }
 
     enum LegacyCodingKeys: String, CodingKey {
@@ -132,6 +180,8 @@ extension BlockerSettings {
         autoCloseWebsites = try c.decodeIfPresent([String].self, forKey: .autoCloseWebsites) ?? []
         blockedKeywords = try c.decodeIfPresent([String].self, forKey: .blockedKeywords) ?? BlockerSettings.default().blockedKeywords
         motivationalPhrases = try c.decodeIfPresent([String].self, forKey: .motivationalPhrases) ?? BlockerSettings.default().motivationalPhrases
+        whitelistedApps = try c.decodeIfPresent([String].self, forKey: .whitelistedApps) ?? BlockerSettings.default().whitelistedApps
+        whitelistedWebsites = try c.decodeIfPresent([String].self, forKey: .whitelistedWebsites) ?? []
     }
 }
 

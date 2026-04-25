@@ -24,6 +24,7 @@ private enum SettingsSelection: String {
     case blockerGeneral
     case blockerReminder
     case blockerAutoClose
+    case blockerWhitelist
     case window
     case general
 
@@ -32,6 +33,7 @@ private enum SettingsSelection: String {
         case .blockerGeneral: return .general
         case .blockerReminder: return .reminder
         case .blockerAutoClose: return .autoClose
+        case .blockerWhitelist: return .whitelist
         case .window, .general: return nil
         }
     }
@@ -41,6 +43,7 @@ private enum SettingsSelection: String {
         case .general: return .blockerGeneral
         case .reminder: return .blockerReminder
         case .autoClose: return .blockerAutoClose
+        case .whitelist: return .blockerWhitelist
         }
     }
 }
@@ -926,6 +929,73 @@ final class TodoManager: ObservableObject {
         blockerSettings.motivationalPhrases = defaults.motivationalPhrases
     }
 
+    // MARK: - Whitelist management
+
+    func containsWhitelistedApp(_ app: String) -> Bool {
+        containsBlockerItem(app.trimmingCharacters(in: .whitespacesAndNewlines), in: blockerSettings.whitelistedApps)
+    }
+
+    func containsWhitelistedWebsite(_ website: String) -> Bool {
+        containsBlockerItem(website.trimmingCharacters(in: .whitespacesAndNewlines), in: blockerSettings.whitelistedWebsites)
+    }
+
+    @discardableResult
+    func addWhitelistedApp(_ app: String) -> String? {
+        insertBlockerItem(app, into: &blockerSettings.whitelistedApps)
+    }
+
+    func removeWhitelistedApp(at offsets: IndexSet) {
+        blockerSettings.whitelistedApps.remove(atOffsets: offsets)
+    }
+
+    @discardableResult
+    func addWhitelistedWebsite(_ website: String) -> String? {
+        insertBlockerItem(website, into: &blockerSettings.whitelistedWebsites)
+    }
+
+    func removeWhitelistedWebsite(at offsets: IndexSet) {
+        blockerSettings.whitelistedWebsites.remove(atOffsets: offsets)
+    }
+
+    func resetWhitelistedAppsToDefault() {
+        blockerSettings.whitelistedApps = BlockerSettings.default().whitelistedApps
+    }
+
+    func resetWhitelistedWebsitesToDefault() {
+        blockerSettings.whitelistedWebsites = BlockerSettings.default().whitelistedWebsites
+    }
+
+    func resetWhitelistToDefault() {
+        let defaults = BlockerSettings.default()
+        blockerSettings.whitelistedApps = defaults.whitelistedApps
+        blockerSettings.whitelistedWebsites = defaults.whitelistedWebsites
+    }
+
+    /// Returns true if the given app name or bundle ID is a Microsoft app that should never be blocked.
+    private func isMicrosoftApp(appName: String, bundleID: String) -> Bool {
+        let microsoftBundlePrefixes = [
+            "com.microsoft.", "com.apple.dt.xcode" // keep Xcode safe too
+        ]
+        let microsoftNameFragments = [
+            "microsoft", "ms teams", "onedrive", "visual studio"
+        ]
+        let lowerName = appName.lowercased()
+        let lowerBundle = bundleID.lowercased()
+        if microsoftBundlePrefixes.contains(where: { lowerBundle.hasPrefix($0) }) { return true }
+        if microsoftNameFragments.contains(where: { lowerName.contains($0) }) { return true }
+        return false
+    }
+
+    /// Returns true if the given app name or bundle ID is in the whitelist.
+    private func isWhitelistedApp(appName: String, bundleID: String) -> Bool {
+        let lower = appName.lowercased()
+        let lowerBundle = bundleID.lowercased()
+        return blockerSettings.whitelistedApps.contains(where: { entry in
+            let needle = entry.lowercased()
+            return lower.contains(needle) || lowerBundle.contains(needle)
+        })
+    }
+
     func evaluateDistraction() {
         guard blockerSettings.isEnabled, blockerSettings.appMonitoringPermissionGranted else {
             latestDetectedDistraction = nil
@@ -950,6 +1020,25 @@ final class TodoManager: ObservableObject {
 
         if debugModeEnabled {
             print("[Blocker] Checking app: \(appName) (\(bundleID))")
+        }
+
+        // ── Whitelist check: skip whitelisted and Microsoft apps ──────────────
+        if isMicrosoftApp(appName: appName, bundleID: bundleID) {
+            if debugModeEnabled {
+                print("[Blocker] Skipping Microsoft app: \(appName)")
+            }
+            latestDetectedDistraction = nil
+            consecutiveShortsStrikes = 0
+            return
+        }
+
+        if isWhitelistedApp(appName: appName, bundleID: bundleID) {
+            if debugModeEnabled {
+                print("[Blocker] Skipping whitelisted app: \(appName)")
+            }
+            latestDetectedDistraction = nil
+            consecutiveShortsStrikes = 0
+            return
         }
 
         // ── Layer 1: App name / bundle ID match ──────────────────────────────
@@ -1007,6 +1096,7 @@ final class TodoManager: ObservableObject {
             blockedKeywords: blockerSettings.blockedKeywords,
             blockYouTubeVideos: blockerSettings.blockYouTubeVideos,
             isBrowser: isBrowser,
+            whitelistedWebsites: blockerSettings.whitelistedWebsites,
             debugMode: debugModeEnabled
         ) {
             latestDetectedDistraction = windowMatch.label
@@ -1025,6 +1115,7 @@ final class TodoManager: ObservableObject {
                 autoCloseWebsites: blockerSettings.autoCloseWebsites,
                 blockedKeywords: blockerSettings.blockedKeywords,
                 blockYouTubeVideos: blockerSettings.blockYouTubeVideos,
+                whitelistedWebsites: blockerSettings.whitelistedWebsites,
                 debugMode: debugModeEnabled
             ) {
                 latestDetectedDistraction = axMatch.label
@@ -1302,6 +1393,7 @@ enum DistractionDetector {
         blockedKeywords: [String],
         blockYouTubeVideos: Bool,
         isBrowser: Bool,
+        whitelistedWebsites: [String] = [],
         debugMode: Bool = false
     ) -> MatchResult? {
         let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
@@ -1327,7 +1419,8 @@ enum DistractionDetector {
                 reminderWebsites: reminderWebsites,
                 autoCloseWebsites: autoCloseWebsites,
                 blockedKeywords: blockedKeywords,
-                blockYouTubeVideos: blockYouTubeVideos
+                blockYouTubeVideos: blockYouTubeVideos,
+                whitelistedWebsites: whitelistedWebsites
             ) {
                 return match
             }
@@ -1343,6 +1436,7 @@ enum DistractionDetector {
         autoCloseWebsites: [String],
         blockedKeywords: [String],
         blockYouTubeVideos: Bool,
+        whitelistedWebsites: [String] = [],
         debugMode: Bool = false
     ) -> MatchResult? {
         let appElement = AXUIElementCreateApplication(pid)
@@ -1364,7 +1458,8 @@ enum DistractionDetector {
             reminderWebsites: reminderWebsites,
             autoCloseWebsites: autoCloseWebsites,
             blockedKeywords: blockedKeywords,
-            blockYouTubeVideos: blockYouTubeVideos
+            blockYouTubeVideos: blockYouTubeVideos,
+            whitelistedWebsites: whitelistedWebsites
         )
     }
 
@@ -1374,8 +1469,21 @@ enum DistractionDetector {
         reminderWebsites: [String],
         autoCloseWebsites: [String],
         blockedKeywords: [String],
-        blockYouTubeVideos: Bool
+        blockYouTubeVideos: Bool,
+        whitelistedWebsites: [String] = []
     ) -> MatchResult? {
+        // Whitelist check — skip if any whitelisted website matches the title
+        for site in whitelistedWebsites {
+            let needle = site.lowercased()
+                .replacingOccurrences(of: "www.", with: "")
+                .replacingOccurrences(of: "https://", with: "")
+                .replacingOccurrences(of: "http://", with: "")
+            let baseName = needle.components(separatedBy: ".").first ?? needle
+            if title.contains(baseName) || title.contains(needle) {
+                return nil
+            }
+        }
+
         // YouTube Shorts — always blocked
         if title.contains("shorts") && (title.contains("youtube") || title.contains("yt")) {
             return MatchResult(label: "YouTube Shorts", action: .autoClose)
@@ -3232,6 +3340,11 @@ struct SettingsRootView: View {
                         systemImage: "bolt.shield",
                         selection: .blockerAutoClose
                     )
+                    settingsSidebarRow(
+                        title: "Whitelist",
+                        systemImage: "checkmark.shield",
+                        selection: .blockerWhitelist
+                    )
                 } label: {
                     Label("Blocker", systemImage: "shield.lefthalf.filled")
                         .font(.headline)
@@ -3384,6 +3497,7 @@ enum BlockerSidebarItem: String, CaseIterable, Identifiable {
     case general
     case reminder
     case autoClose
+    case whitelist
 
     var id: String { rawValue }
 
@@ -3392,6 +3506,7 @@ enum BlockerSidebarItem: String, CaseIterable, Identifiable {
         case .general: return "General Blocker"
         case .reminder: return "Reminder Category"
         case .autoClose: return "Auto Close Category"
+        case .whitelist: return "Whitelist"
         }
     }
 
@@ -3400,6 +3515,7 @@ enum BlockerSidebarItem: String, CaseIterable, Identifiable {
         case .general: return "All blocker sections in one connected page"
         case .reminder: return "Popup-only apps, sites, and shared rules"
         case .autoClose: return "Force-close rules plus shared blocker lists"
+        case .whitelist: return "Apps and sites that are never blocked"
         }
     }
 }
@@ -3429,6 +3545,8 @@ struct BlockerSettingsView: View {
     @State private var newAutoCloseSite = ""
     @State private var newKeyword = ""
     @State private var newPhrase = ""
+    @State private var newWhitelistApp = ""
+    @State private var newWhitelistSite = ""
     @State private var pendingMirrorPrompt: BlockerMirrorPrompt?
     @State private var isProgrammaticScroll = false
 
@@ -3445,6 +3563,9 @@ struct BlockerSettingsView: View {
                     autoCloseCategorySection(includeSharedSupport: false)
                         .id(BlockerSidebarItem.autoClose)
                         .trackBlockerSection(.autoClose)
+                    whitelistCategorySection
+                        .id(BlockerSidebarItem.whitelist)
+                        .trackBlockerSection(.whitelist)
                     sharedBlockerSupportSection
                 }
                 .padding(20)
@@ -3605,7 +3726,13 @@ struct BlockerSettingsView: View {
                     newValue: $newReminderApp,
                     onAdd: handleReminderAppAdd,
                     onDelete: manager.removeBlockedApp,
-                    onReset: manager.resetReminderAppsToDefault
+                    onReset: manager.resetReminderAppsToDefault,
+                    onSelectApp: {
+                        selectAppFromFinder { appName in
+                            newReminderApp = appName
+                            handleReminderAppAdd()
+                        }
+                    }
                 )
 
                 blockerListSection(
@@ -3644,7 +3771,13 @@ struct BlockerSettingsView: View {
                     newValue: $newAutoCloseApp,
                     onAdd: handleAutoCloseAppAdd,
                     onDelete: manager.removeAutoCloseApp,
-                    onReset: manager.resetAutoCloseAppsToDefault
+                    onReset: manager.resetAutoCloseAppsToDefault,
+                    onSelectApp: {
+                        selectAppFromFinder { appName in
+                            newAutoCloseApp = appName
+                            handleAutoCloseAppAdd()
+                        }
+                    }
                 )
 
                 blockerListSection(
@@ -3661,6 +3794,87 @@ struct BlockerSettingsView: View {
 
             if includeSharedSupport {
                 sharedBlockerSupportSection
+            }
+        }
+    }
+
+    private var whitelistCategorySection: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            blockerSectionHeader(
+                title: "Whitelist",
+                description: "Apps and websites on this list are never blocked, regardless of what appears in the Reminder or Auto Close lists. Microsoft productivity apps are always exempt by default.",
+                resetTitle: "Reset Whitelist",
+                onReset: manager.resetWhitelistToDefault
+            )
+
+            HStack(alignment: .top, spacing: 16) {
+                blockerListSection(
+                    title: "Whitelisted Apps",
+                    subtitle: "These apps will never trigger a reminder or be auto-closed. Use 'Select App' to pick from installed apps.",
+                    items: manager.blockerSettings.whitelistedApps,
+                    placeholder: "App name or bundle ID",
+                    newValue: $newWhitelistApp,
+                    onAdd: {
+                        if manager.addWhitelistedApp(newWhitelistApp) != nil {
+                            newWhitelistApp = ""
+                        }
+                    },
+                    onDelete: manager.removeWhitelistedApp,
+                    onReset: manager.resetWhitelistedAppsToDefault,
+                    onSelectApp: {
+                        selectAppFromFinder { appName in
+                            newWhitelistApp = appName
+                            if manager.addWhitelistedApp(appName) != nil {
+                                newWhitelistApp = ""
+                            }
+                        }
+                    }
+                )
+
+                blockerListSection(
+                    title: "Whitelisted Websites",
+                    subtitle: "These websites will never trigger a reminder or be auto-closed.",
+                    items: manager.blockerSettings.whitelistedWebsites,
+                    placeholder: "Domain or URL fragment",
+                    newValue: $newWhitelistSite,
+                    onAdd: {
+                        if manager.addWhitelistedWebsite(newWhitelistSite) != nil {
+                            newWhitelistSite = ""
+                        }
+                    },
+                    onDelete: manager.removeWhitelistedWebsite,
+                    onReset: manager.resetWhitelistedWebsitesToDefault
+                )
+            }
+
+            GroupBox("How whitelisting works") {
+                VStack(alignment: .leading, spacing: 8) {
+                    researchRow(icon: "checkmark.shield", text: "Whitelisted apps bypass all detection layers — no popup, no auto-close.")
+                    researchRow(icon: "building.2", text: "All Microsoft apps (Word, Excel, Teams, Edge, etc.) are always exempt and never show the reminder window.")
+                    researchRow(icon: "app.badge.checkmark", text: "Use 'Select App' to browse your Applications folder and pick an app directly.")
+                    researchRow(icon: "globe.badge.chevron.backward", text: "Whitelisted websites override any matching entry in the Reminder or Auto Close lists.")
+                }
+                .padding(4)
+            }
+        }
+    }
+
+    private func selectAppFromFinder(completion: @escaping (String) -> Void) {
+        let panel = NSOpenPanel()
+        panel.title = "Select an App to Whitelist"
+        panel.message = "Choose an application to add to the whitelist"
+        panel.allowedContentTypes = [.application]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.directoryURL = URL(fileURLWithPath: "/Applications")
+
+        panel.begin { response in
+            guard response == .OK, let url = panel.url else { return }
+            // Use the app bundle name without extension
+            let appName = url.deletingPathExtension().lastPathComponent
+            DispatchQueue.main.async {
+                completion(appName)
             }
         }
     }
@@ -3801,7 +4015,8 @@ struct BlockerSettingsView: View {
         newValue: Binding<String>,
         onAdd: @escaping () -> Void,
         onDelete: @escaping (IndexSet) -> Void,
-        onReset: (() -> Void)? = nil
+        onReset: (() -> Void)? = nil,
+        onSelectApp: (() -> Void)? = nil
     ) -> some View {
         GroupBox {
             VStack(alignment: .leading, spacing: 8) {
@@ -3839,6 +4054,10 @@ struct BlockerSettingsView: View {
                                 onAdd()
                             }
                         }
+                    if let onSelectApp {
+                        Button("Select App") { onSelectApp() }
+                            .help("Browse Applications folder to pick an app")
+                    }
                     Button("Add") { onAdd() }
                         .disabled(newValue.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
