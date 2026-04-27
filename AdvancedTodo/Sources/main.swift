@@ -1294,7 +1294,7 @@ final class TodoManager: ObservableObject {
     }
 
     /// Subscribe to workspace notifications so detection fires instantly on app switch,
-    /// not just on the 6-second poll.
+    /// not just on the poll.
     func startWorkspaceObservation() {
         NSWorkspace.shared.notificationCenter.addObserver(
             self,
@@ -1302,10 +1302,32 @@ final class TodoManager: ObservableObject {
             name: NSWorkspace.didActivateApplicationNotification,
             object: nil
         )
+        // Start the internal polling timer (adapts speed based on phase)
+        startPollingTimer()
     }
 
     @objc private func workspaceAppDidActivate(_ notification: Notification) {
         evaluateDistraction()
+    }
+
+    // MARK: - Internal adaptive polling timer
+
+    private var pollingTimer: Timer?
+
+    /// Starts (or restarts) the polling timer at the correct interval for the current phase.
+    /// Work phase → 1 s.  Everything else → 6 s.
+    func startPollingTimer() {
+        let interval: TimeInterval = (focusPhase == .working) ? 1.0 : 6.0
+        // Don't restart if already running at the right interval
+        if let existing = pollingTimer, abs(existing.timeInterval - interval) < 0.01 { return }
+        pollingTimer?.invalidate()
+        pollingTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+            self?.evaluateDistraction()
+        }
+        RunLoop.main.add(pollingTimer!, forMode: .common)
+        if debugModeEnabled {
+            print("[Blocker] Polling timer set to \(interval)s (phase: \(focusPhase))")
+        }
     }
     
     /// Handles window close/minimize attempts with confirmation dialog
@@ -1396,6 +1418,7 @@ final class TodoManager: ObservableObject {
         lastWarningAt = nil             // reset warning clock
         lastDistractionPromptAt = Date() // suppress prompt during session
         startMenuBarCountdown()
+        startPollingTimer()             // relax → 6 s polling
     }
 
     /// Called when the relax timer expires — transition to work phase.
@@ -1403,6 +1426,7 @@ final class TodoManager: ObservableObject {
         focusPhaseStartedAt = Date()
         focusPhase = .working
         startMenuBarCountdown()
+        startPollingTimer()             // work → 1 s polling
     }
 
     /// Called when the work timer expires — show celebration.
@@ -1435,6 +1459,7 @@ final class TodoManager: ObservableObject {
         lastWarningAt = nil
         stopMenuBarCountdown()
         lastDistractionPromptAt = nil
+        startPollingTimer()             // back to 6 s polling
     }
 
     /// Seconds remaining in the current phase.
@@ -1708,21 +1733,27 @@ enum DistractionDetector {
                 print("[Blocker] Layer 3 browser URL: \(urlString)")
             }
 
+            // Normalise the URL once: strip scheme and www for clean matching
+            let normURL = lowerURL
+                .replacingOccurrences(of: "https://", with: "")
+                .replacingOccurrences(of: "http://", with: "")
+                .replacingOccurrences(of: "www.", with: "")
+
             // Whitelist check on URL
             for site in whitelistedWebsites {
                 let needle = normaliseHost(site)
-                if lowerURL.contains(needle) { return nil }
+                if normURL.contains(needle) { return nil }
             }
 
-            // YouTube Shorts — URL contains /shorts/
-            if lowerURL.contains("youtube.com/shorts") || lowerURL.contains("youtu.be/shorts") {
+            // YouTube Shorts — URL contains /shorts/ (handle www. prefix too)
+            if normURL.hasPrefix("youtube.com/shorts") || normURL.contains("/shorts/") && normURL.contains("youtube") {
                 return MatchResult(label: "YouTube Shorts", action: .autoClose)
             }
 
             // Check auto-close websites against URL (full needle match only)
             for site in autoCloseWebsites {
                 let needle = normaliseHost(site)
-                if urlMatchesSite(lowerURL, needle: needle) {
+                if urlMatchesSite(normURL, needle: needle) {
                     return MatchResult(label: site, action: .autoClose)
                 }
             }
@@ -1730,7 +1761,7 @@ enum DistractionDetector {
             // Check reminder websites against URL (full needle match only)
             for site in reminderWebsites {
                 let needle = normaliseHost(site)
-                if urlMatchesSite(lowerURL, needle: needle) {
+                if urlMatchesSite(normURL, needle: needle) {
                     return MatchResult(label: site, action: .reminder)
                 }
             }
@@ -1763,20 +1794,22 @@ enum DistractionDetector {
             .replacingOccurrences(of: "www.", with: "")
     }
 
-    /// Returns true when a URL string contains the given site needle as a proper host match.
-    /// Requires the needle to appear after a scheme/slash boundary so "x.com" doesn't
-    /// match "example.com" or a file path containing the letter "x".
-    static func urlMatchesSite(_ url: String, needle: String) -> Bool {
+    /// Returns true when a normalised URL string (no scheme, no www) contains
+    /// the given site needle as a proper host match.
+    static func urlMatchesSite(_ normURL: String, needle: String) -> Bool {
         guard !needle.isEmpty else { return false }
-        // Direct substring is fine for multi-part needles like "youtube.com/shorts"
-        // because the path component makes them specific enough.
+        // Path-based needles like "youtube.com/shorts" — direct substring is fine
+        // because the path makes them specific enough.
         if needle.contains("/") {
-            return url.contains(needle)
+            return normURL.contains(needle)
         }
-        // For bare domains like "x.com", "reddit.com" — require a host boundary.
-        // The URL must contain the needle preceded by "://" or "." or "/" or start.
-        let patterns = ["://\(needle)", ".\(needle)", "/\(needle)"]
-        return patterns.contains(where: { url.contains($0) }) || url.hasPrefix(needle)
+        // Bare domain like "reddit.com", "tiktok.com" — require host boundary so
+        // "x.com" doesn't match "example.com" or "ox.com".
+        // The normalised URL starts with the host, so check for exact prefix or
+        // preceded by a dot (subdomain) or slash.
+        return normURL.hasPrefix(needle) ||
+               normURL.contains(".\(needle)") ||
+               normURL.contains("/\(needle)")
     }
 
     /// Attempts to read the current URL from a browser's address bar via AX API.
@@ -3439,9 +3472,9 @@ struct ContentView: View {
             reloadCheckpointRecords()
             showingCheckpointBrowser = true
         }
-        .onReceive(blockerPollingTimer) { _ in
-            manager.evaluateDistraction()
-            // If a session is running and the celebration phase triggered, show the prompt
+        .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { _ in
+            // Check if celebration phase needs to show the prompt
+            // (the manager's internal timer handles evaluateDistraction)
             if manager.focusPhase == .celebrating {
                 blockerPromptController.show(manager: manager)
             }
