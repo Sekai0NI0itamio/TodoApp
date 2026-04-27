@@ -2655,13 +2655,12 @@ class TodoWindow: NSWindow {
 // MARK: - Blocker Prompt Window Controller (Full-Screen Intelligent Timer)
 
 final class BlockerPromptWindowController: NSObject, NSWindowDelegate {
-    private var window: NSWindow?
+    private var window: PromptWindow?
     private weak var manager: TodoManager?
 
     func show(manager: TodoManager) {
         self.manager = manager
 
-        // Use the full screen frame (not visibleFrame) so we cover the menu bar area too
         let screenFrame = NSScreen.main?.frame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
 
         if window == nil {
@@ -2670,13 +2669,12 @@ final class BlockerPromptWindowController: NSObject, NSWindowDelegate {
             }
             let host = NSHostingView(rootView: root)
 
-            let promptWindow = NSWindow(
+            let promptWindow = PromptWindow(
                 contentRect: screenFrame,
                 styleMask: [.borderless],
                 backing: .buffered,
                 defer: false
             )
-            // Float above everything — higher than .statusBar so it covers the menu bar
             promptWindow.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.maximumWindow)) - 1)
             promptWindow.contentView = host
             promptWindow.isReleasedWhenClosed = false
@@ -2690,18 +2688,48 @@ final class BlockerPromptWindowController: NSObject, NSWindowDelegate {
         window?.setFrame(screenFrame, display: true)
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        // If we're showing the celebration/reflection screen, focus the text field
+        if manager.focusPhase == .celebrating {
+            window?.focusFirstTextField()
+        }
     }
 
     func hide() {
         window?.orderOut(nil)
     }
 
-    // Prevent the user from closing the window via keyboard shortcuts
-    // when they haven't made a choice yet (idle phase).
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         guard let mgr = manager else { return true }
-        // Allow close only if a session is already running or we're celebrating
         return mgr.focusPhase != .idle
+    }
+}
+
+/// Custom NSWindow subclass that allows borderless windows to become key
+/// and accept first responder — required for TextEditor to receive keyboard input.
+class PromptWindow: NSWindow {
+    override var canBecomeKey: Bool  { true }
+    override var canBecomeMain: Bool { true }
+
+    /// When the celebration view appears, make the TextEditor first responder
+    /// so the user can type immediately without an extra click.
+    func focusFirstTextField() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            guard let self else { return }
+            self.makeKey()
+            // Walk the view hierarchy to find the first NSTextView and make it first responder
+            if let textView = self.findFirstTextView(in: self.contentView) {
+                self.makeFirstResponder(textView)
+            }
+        }
+    }
+
+    private func findFirstTextView(in view: NSView?) -> NSTextView? {
+        guard let view else { return nil }
+        if let tv = view as? NSTextView { return tv }
+        for sub in view.subviews {
+            if let found = findFirstTextView(in: sub) { return found }
+        }
+        return nil
     }
 }
 
@@ -3000,6 +3028,104 @@ struct BlockerPromptView: View {
     }
 }
 
+// MARK: - Reflection Text Editor (NSTextView-backed, works in borderless windows)
+
+/// A plain NSTextView wrapped for SwiftUI. Unlike TextEditor, this correctly
+/// becomes first responder inside borderless NSWindows (the prompt overlay).
+struct ReflectionTextEditor: NSViewRepresentable {
+    @Binding var text: String
+    var placeholder: String = ""
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSScrollView()
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.borderType = .noBorder
+        scrollView.drawsBackground = true
+        scrollView.backgroundColor = NSColor.white.withAlphaComponent(0.07)
+
+        let textView = NSTextView()
+        textView.isEditable = true
+        textView.isSelectable = true
+        textView.allowsUndo = true
+        textView.isRichText = false
+        textView.font = .systemFont(ofSize: 18)
+        textView.textColor = .white
+        textView.backgroundColor = .clear
+        textView.drawsBackground = false
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainerInset = NSSize(width: 10, height: 10)
+        textView.delegate = context.coordinator
+
+        // Placeholder
+        if text.isEmpty {
+            textView.string = ""
+            context.coordinator.showingPlaceholder = false
+        }
+
+        scrollView.documentView = textView
+        context.coordinator.textView = textView
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        guard let textView = scrollView.documentView as? NSTextView else { return }
+        // Only update if the binding changed externally (avoid cursor jump)
+        if !context.coordinator.isEditing && textView.string != text {
+            textView.string = text
+        }
+        // Update placeholder visibility
+        if text.isEmpty && !context.coordinator.isEditing {
+            textView.string = placeholder
+            textView.textColor = NSColor.white.withAlphaComponent(0.3)
+            context.coordinator.showingPlaceholder = true
+        }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    class Coordinator: NSObject, NSTextViewDelegate {
+        var parent: ReflectionTextEditor
+        var isEditing = false
+        var showingPlaceholder = false
+        weak var textView: NSTextView?
+
+        init(_ parent: ReflectionTextEditor) { self.parent = parent }
+
+        func textDidBeginEditing(_ notification: Notification) {
+            isEditing = true
+            guard let tv = notification.object as? NSTextView else { return }
+            // Clear placeholder on first edit
+            if showingPlaceholder {
+                tv.string = ""
+                tv.textColor = .white
+                showingPlaceholder = false
+            }
+        }
+
+        func textDidChange(_ notification: Notification) {
+            guard let tv = notification.object as? NSTextView else { return }
+            if !showingPlaceholder {
+                parent.text = tv.string
+            }
+        }
+
+        func textDidEndEditing(_ notification: Notification) {
+            isEditing = false
+            guard let tv = notification.object as? NSTextView else { return }
+            // Restore placeholder if empty
+            if tv.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                tv.string = parent.placeholder
+                tv.textColor = NSColor.white.withAlphaComponent(0.3)
+                showingPlaceholder = true
+                parent.text = ""
+            }
+        }
+    }
+}
+
 // MARK: - Celebration & Reflection View
 
 struct CelebrationReflectionView: View {
@@ -3043,24 +3169,12 @@ struct CelebrationReflectionView: View {
                         .font(.system(size: 20))
                         .foregroundColor(textSecondary)
 
-                    ZStack(alignment: .topLeading) {
-                        RoundedRectangle(cornerRadius: 14)
-                            .fill(Color.white.opacity(0.07))
-                            .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.white.opacity(0.15), lineWidth: 1))
-                        if workDescription.isEmpty {
-                            Text("Describe what you worked on...")
-                                .font(.system(size: 18))
-                                .foregroundColor(Color.white.opacity(0.3))
-                                .padding(16)
-                        }
-                        TextEditor(text: $workDescription)
-                            .font(.system(size: 18))
-                            .foregroundColor(textPrimary)
-                            .scrollContentBackground(.hidden)
-                            .background(Color.clear)
-                            .padding(10)
-                    }
-                    .frame(height: 140)
+                    // Use a native NSTextView wrapper — SwiftUI TextEditor can fail
+                    // to accept keyboard input inside borderless windows.
+                    ReflectionTextEditor(text: $workDescription, placeholder: "Describe what you worked on...")
+                        .frame(height: 140)
+                        .clipShape(RoundedRectangle(cornerRadius: 14))
+                        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.white.opacity(0.15), lineWidth: 1))
 
                     VStack(alignment: .leading, spacing: 10) {
                         Text("Rate this session")
