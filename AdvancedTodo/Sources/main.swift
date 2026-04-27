@@ -1129,11 +1129,12 @@ final class TodoManager: ObservableObject {
 
         // ── Layer 2: Window titles via CGWindowList (no extra permission) ─────
         // This catches browser tabs showing distracting content.
+        // Only run for known browsers — non-browser apps don't have URLs in their titles.
         let isBrowser = DistractionDetector.isBrowserBundleID(bundleID)
         if debugModeEnabled {
             print("[Blocker] Is browser: \(isBrowser)")
         }
-        if let windowMatch = DistractionDetector.checkWindowTitles(
+        if isBrowser, let windowMatch = DistractionDetector.checkWindowTitles(
             for: activeApp.processIdentifier,
             reminderWebsites: blockerSettings.reminderWebsites,
             autoCloseWebsites: blockerSettings.autoCloseWebsites,
@@ -1160,6 +1161,7 @@ final class TodoManager: ObservableObject {
                 blockedKeywords: blockerSettings.blockedKeywords,
                 blockYouTubeVideos: blockerSettings.blockYouTubeVideos,
                 whitelistedWebsites: blockerSettings.whitelistedWebsites,
+                isBrowser: isBrowser,
                 debugMode: debugModeEnabled
             ) {
                 latestDetectedDistraction = axMatch.label
@@ -1681,6 +1683,7 @@ enum DistractionDetector {
         blockedKeywords: [String],
         blockYouTubeVideos: Bool,
         whitelistedWebsites: [String] = [],
+        isBrowser: Bool = false,
         debugMode: Bool = false
     ) -> MatchResult? {
         let appElement = AXUIElementCreateApplication(pid)
@@ -1696,9 +1699,10 @@ enum DistractionDetector {
             print("[Blocker] Layer 3 checking AX window: \(rawTitle)")
         }
 
-        // ── Try to read the browser URL bar for accurate URL-based detection ──
-        // This catches YouTube Shorts whose window title is just the video name.
-        if let urlString = readBrowserURLFromAX(appElement: appElement, debugMode: debugMode) {
+        // ── URL-bar reading: ONLY for known browsers ──────────────────────────
+        // Never walk the AX tree of coding apps, terminals, etc. — they have
+        // text fields whose content can accidentally match domain names.
+        if isBrowser, let urlString = readBrowserURLFromAX(appElement: appElement, debugMode: debugMode) {
             let lowerURL = urlString.lowercased()
             if debugMode {
                 print("[Blocker] Layer 3 browser URL: \(urlString)")
@@ -1706,10 +1710,7 @@ enum DistractionDetector {
 
             // Whitelist check on URL
             for site in whitelistedWebsites {
-                let needle = site.lowercased()
-                    .replacingOccurrences(of: "www.", with: "")
-                    .replacingOccurrences(of: "https://", with: "")
-                    .replacingOccurrences(of: "http://", with: "")
+                let needle = normaliseHost(site)
                 if lowerURL.contains(needle) { return nil }
             }
 
@@ -1718,28 +1719,30 @@ enum DistractionDetector {
                 return MatchResult(label: "YouTube Shorts", action: .autoClose)
             }
 
-            // Check auto-close websites against URL
+            // Check auto-close websites against URL (full needle match only)
             for site in autoCloseWebsites {
-                let needle = site.lowercased()
-                    .replacingOccurrences(of: "www.", with: "")
-                    .replacingOccurrences(of: "https://", with: "")
-                    .replacingOccurrences(of: "http://", with: "")
-                if lowerURL.contains(needle) {
+                let needle = normaliseHost(site)
+                if urlMatchesSite(lowerURL, needle: needle) {
                     return MatchResult(label: site, action: .autoClose)
                 }
             }
 
-            // Check reminder websites against URL
+            // Check reminder websites against URL (full needle match only)
             for site in reminderWebsites {
-                let needle = site.lowercased()
-                    .replacingOccurrences(of: "www.", with: "")
-                    .replacingOccurrences(of: "https://", with: "")
-                    .replacingOccurrences(of: "http://", with: "")
-                if lowerURL.contains(needle) {
+                let needle = normaliseHost(site)
+                if urlMatchesSite(lowerURL, needle: needle) {
                     return MatchResult(label: site, action: .reminder)
                 }
             }
+
+            // URL was read successfully but didn't match anything — clean.
+            return nil
         }
+
+        // No URL available (non-browser or URL read failed) — fall back to title matching.
+        // Only run title matching for browsers; non-browser apps should never be matched
+        // by website rules (they don't have URLs).
+        guard isBrowser else { return nil }
 
         let title = rawTitle.lowercased()
         return matchTitle(
@@ -1750,6 +1753,30 @@ enum DistractionDetector {
             blockYouTubeVideos: blockYouTubeVideos,
             whitelistedWebsites: whitelistedWebsites
         )
+    }
+
+    /// Strips scheme and www prefix from a site string for clean matching.
+    static func normaliseHost(_ site: String) -> String {
+        site.lowercased()
+            .replacingOccurrences(of: "https://", with: "")
+            .replacingOccurrences(of: "http://", with: "")
+            .replacingOccurrences(of: "www.", with: "")
+    }
+
+    /// Returns true when a URL string contains the given site needle as a proper host match.
+    /// Requires the needle to appear after a scheme/slash boundary so "x.com" doesn't
+    /// match "example.com" or a file path containing the letter "x".
+    static func urlMatchesSite(_ url: String, needle: String) -> Bool {
+        guard !needle.isEmpty else { return false }
+        // Direct substring is fine for multi-part needles like "youtube.com/shorts"
+        // because the path component makes them specific enough.
+        if needle.contains("/") {
+            return url.contains(needle)
+        }
+        // For bare domains like "x.com", "reddit.com" — require a host boundary.
+        // The URL must contain the needle preceded by "://" or "." or "/" or start.
+        let patterns = ["://\(needle)", ".\(needle)", "/\(needle)"]
+        return patterns.contains(where: { url.contains($0) }) || url.hasPrefix(needle)
     }
 
     /// Attempts to read the current URL from a browser's address bar via AX API.
@@ -1770,21 +1797,19 @@ enum DistractionDetector {
     private static func findURLInElement(_ element: AXUIElement, depth: Int, maxDepth: Int, debugMode: Bool) -> String? {
         guard depth <= maxDepth else { return nil }
 
-        // Check role
         var roleRef: AnyObject?
         AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &roleRef)
         let role = roleRef as? String ?? ""
 
-        // Check if this element is a text field or URL field
+        // Only inspect text fields and URL fields
         if role == "AXTextField" || role == "AXComboBox" || role == "AXURLField" {
             var valueRef: AnyObject?
             if AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &valueRef) == .success,
                let value = valueRef as? String {
                 let lower = value.lowercased()
-                // Validate it looks like a URL
-                if lower.hasPrefix("http://") || lower.hasPrefix("https://") ||
-                   lower.hasPrefix("www.") || lower.contains(".com") || lower.contains(".io") ||
-                   lower.contains(".net") || lower.contains(".org") {
+                // Must look like an actual URL — require scheme or www prefix.
+                // This prevents file paths, code snippets, etc. from being treated as URLs.
+                if lower.hasPrefix("http://") || lower.hasPrefix("https://") || lower.hasPrefix("www.") {
                     return value
                 }
             }
@@ -1804,6 +1829,8 @@ enum DistractionDetector {
     }
 
     // ── Shared matching logic ─────────────────────────────────────────────────
+    // Used by Layer 2 (CGWindow titles) for browser windows only.
+    // Layer 3 uses URL-based matching instead (more accurate).
     static func matchTitle(
         _ title: String,
         reminderWebsites: [String],
@@ -1812,73 +1839,97 @@ enum DistractionDetector {
         blockYouTubeVideos: Bool,
         whitelistedWebsites: [String] = []
     ) -> MatchResult? {
-        // Whitelist check — skip if any whitelisted website matches the title
+        // Whitelist check
         for site in whitelistedWebsites {
-            let needle = site.lowercased()
-                .replacingOccurrences(of: "www.", with: "")
-                .replacingOccurrences(of: "https://", with: "")
-                .replacingOccurrences(of: "http://", with: "")
-            let baseName = needle.components(separatedBy: ".").first ?? needle
-            if title.contains(baseName) || title.contains(needle) {
-                return nil
-            }
+            if titleContainsSite(title, site: site) { return nil }
         }
 
-        // YouTube Shorts — detect via title containing "shorts" alongside "youtube"
-        // or just "youtube shorts" as a phrase. Some browsers show "YouTube Shorts" in title.
-        if title.contains("youtube") && title.contains("shorts") {
-            return MatchResult(label: "YouTube Shorts", action: .autoClose)
-        }
-        // Also catch "#shorts" tag in video titles
-        if title.contains("youtube") && title.contains("#shorts") {
+        // YouTube Shorts — title must contain both "youtube" and "shorts" as distinct words
+        if titleContainsWord(title, word: "youtube") &&
+           (titleContainsWord(title, word: "shorts") || title.contains("#shorts")) {
             return MatchResult(label: "YouTube Shorts", action: .autoClose)
         }
 
-        // YouTube videos/home/feed (configurable reminder only)
-        if blockYouTubeVideos && title.contains("youtube") && !title.contains("youtube music") {
+        // YouTube videos (configurable)
+        if blockYouTubeVideos && titleContainsWord(title, word: "youtube") && !title.contains("youtube music") {
             return MatchResult(label: "YouTube", action: .reminder)
         }
 
-        // Explicit auto-close website list
+        // Auto-close websites
         for site in autoCloseWebsites {
-            let needle = site.lowercased()
-                .replacingOccurrences(of: "www.", with: "")
-                .replacingOccurrences(of: "https://", with: "")
-                .replacingOccurrences(of: "http://", with: "")
-            // For path-based entries like "youtube.com/shorts", check each path segment too
-            let pathParts = needle.components(separatedBy: "/")
-            let domainPart = pathParts.first ?? needle
-            let baseName = domainPart.components(separatedBy: ".").first ?? domainPart
-            // Match if title contains the full needle, the domain, or all path segments
-            let allPartsMatch = pathParts.allSatisfy { part in
-                part.isEmpty || title.contains(part)
-            }
-            if title.contains(needle) || allPartsMatch || title.contains(baseName) {
+            if titleContainsSite(title, site: site) {
                 return MatchResult(label: site, action: .autoClose)
             }
         }
 
-        // Reminder websites — match domain fragments against window title
+        // Reminder websites
         for site in reminderWebsites {
-            let needle = site.lowercased()
-                .replacingOccurrences(of: "www.", with: "")
-                .replacingOccurrences(of: "https://", with: "")
-                .replacingOccurrences(of: "http://", with: "")
-            // Extract the base domain name for matching (e.g. "instagram.com" → "instagram")
-            let baseName = needle.components(separatedBy: ".").first ?? needle
-            if title.contains(baseName) || title.contains(needle) {
+            if titleContainsSite(title, site: site) {
                 return MatchResult(label: site, action: .reminder)
             }
         }
 
-        // Blocked keywords are reminder-only by default.
+        // Blocked keywords
         for keyword in blockedKeywords {
-            if title.contains(keyword.lowercased()) {
+            let kw = keyword.lowercased()
+            // Only match keywords that are at least 5 chars to avoid single-letter false positives
+            if kw.count >= 5, title.contains(kw) {
                 return MatchResult(label: keyword, action: .reminder)
             }
         }
 
         return nil
+    }
+
+    /// Returns true if the window title clearly belongs to the given site.
+    /// Uses the full domain name (e.g. "youtube") not just the TLD-stripped base,
+    /// and requires it to appear as a recognisable word in the title.
+    private static func titleContainsSite(_ title: String, site: String) -> Bool {
+        let needle = normaliseHost(site)
+        // For path-based entries like "youtube.com/shorts" split on "/" and check all parts
+        let parts = needle.components(separatedBy: "/").filter { !$0.isEmpty }
+        guard let domain = parts.first else { return false }
+
+        // Extract the meaningful domain word — the part before the first "."
+        // e.g. "youtube.com" → "youtube", "x.com" → "x", "reddit.com" → "reddit"
+        let domainWord = domain.components(separatedBy: ".").first ?? domain
+
+        // Very short domain words (1-2 chars like "x") are too ambiguous for title matching.
+        // They should only be matched via URL (Layer 3), not window title.
+        guard domainWord.count >= 3 else { return false }
+
+        // Require the domain word to appear as a recognisable token in the title.
+        // We check for word-boundary-like conditions: preceded/followed by space, dash,
+        // pipe, dot, or at start/end of string.
+        guard titleContainsWord(title, word: domainWord) else { return false }
+
+        // If the site has a path component (e.g. "youtube.com/shorts"), also require
+        // all path parts to appear in the title.
+        if parts.count > 1 {
+            let pathParts = parts.dropFirst()
+            return pathParts.allSatisfy { part in
+                part.isEmpty || titleContainsWord(title, word: part)
+            }
+        }
+        return true
+    }
+
+    /// Returns true if `word` appears in `text` as a recognisable token
+    /// (surrounded by non-alphanumeric characters or at string boundaries).
+    private static func titleContainsWord(_ text: String, word: String) -> Bool {
+        guard !word.isEmpty else { return false }
+        guard text.contains(word) else { return false }
+        // Walk through all occurrences and check boundaries
+        var searchRange = text.startIndex..<text.endIndex
+        while let range = text.range(of: word, options: .caseInsensitive, range: searchRange) {
+            let beforeOK = range.lowerBound == text.startIndex ||
+                !text[text.index(before: range.lowerBound)].isLetter
+            let afterOK  = range.upperBound == text.endIndex ||
+                !text[range.upperBound].isLetter
+            if beforeOK && afterOK { return true }
+            searchRange = range.upperBound..<text.endIndex
+        }
+        return false
     }
 
     // ── Shorts-type classification ────────────────────────────────────────────
