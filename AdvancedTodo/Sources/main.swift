@@ -3058,7 +3058,7 @@ struct ReflectionsView: View {
 
             Divider().padding(.horizontal, 16)
 
-            // Custom sliders
+            // Relax row — slider + editable text field
             VStack(spacing: 10) {
                 HStack(spacing: 10) {
                     Image(systemName: "moon.fill")
@@ -3069,14 +3069,27 @@ struct ReflectionsView: View {
                         .frame(width: 40, alignment: .leading)
                     Slider(value: Binding(
                         get: { Double(relaxMinutes) },
-                        set: { relaxMinutes = Int($0) }
+                        set: { relaxMinutes = max(1, min(180, Int($0))) }
                     ), in: 5...60, step: 5)
                     .tint(accentGreen)
-                    Text("\(relaxMinutes) min")
-                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                        .frame(width: 50, alignment: .trailing)
+                    // Editable minute field — syncs with slider
+                    HStack(spacing: 3) {
+                        TextField("", value: $relaxMinutes, formatter: minuteFormatter)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 44)
+                            .multilineTextAlignment(.center)
+                            .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                            .onChange(of: relaxMinutes) { v in
+                                relaxMinutes = max(1, min(180, v))
+                            }
+                        Text("min")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(width: 62, alignment: .trailing)
                 }
 
+                // Work row — slider + editable text field
                 HStack(spacing: 10) {
                     Image(systemName: "bolt.fill")
                         .foregroundColor(accentOrange)
@@ -3086,12 +3099,23 @@ struct ReflectionsView: View {
                         .frame(width: 40, alignment: .leading)
                     Slider(value: Binding(
                         get: { Double(workMinutes) },
-                        set: { workMinutes = Int($0) }
+                        set: { workMinutes = max(1, min(480, Int($0))) }
                     ), in: 10...120, step: 5)
                     .tint(accentOrange)
-                    Text("\(workMinutes) min")
-                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                        .frame(width: 50, alignment: .trailing)
+                    HStack(spacing: 3) {
+                        TextField("", value: $workMinutes, formatter: minuteFormatter)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 44)
+                            .multilineTextAlignment(.center)
+                            .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                            .onChange(of: workMinutes) { v in
+                                workMinutes = max(1, min(480, v))
+                            }
+                        Text("min")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(width: 62, alignment: .trailing)
                 }
             }
             .padding(.horizontal, 16)
@@ -3141,7 +3165,16 @@ struct ReflectionsView: View {
             .padding(.bottom, 14)
         }
         .background(Color(NSColor.controlBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: 0))
+    }
+
+    /// Formatter that accepts whole-number minutes and rejects non-numeric input.
+    private var minuteFormatter: NumberFormatter {
+        let f = NumberFormatter()
+        f.numberStyle = .none
+        f.minimum = 1
+        f.maximum = 480
+        f.allowsFloats = false
+        return f
     }
 
     private func presetButton(label: String, icon: String, relax: Int, work: Int, color: Color) -> some View {
