@@ -2453,7 +2453,7 @@ struct AdvancedTodoApp: App {
 
         for window in NSApplication.shared.windows {
             if isDebugWindow(window) { continue }
-            window.level = .floating
+            applyWindowLevel(window)
             window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
             window.identifier = NSUserInterfaceItemIdentifier(mainWindowName)
             window.setFrameAutosaveName(mainWindowName)
@@ -2466,12 +2466,25 @@ struct AdvancedTodoApp: App {
                 window.delegate = delegate
             }
 
-            // Frame was already restored by AppDelegate.applicationDidFinishLaunching
-            // before the window was shown (no flash). Only guard against tiny frames here.
             let f = window.frame
             if f.width < minimumWindowSize.width || f.height < minimumWindowSize.height {
                 window.setFrame(NSRect(x: 100, y: 100, width: defaultWindowSize.width, height: defaultWindowSize.height), display: true)
             }
+        }
+
+        // Apply menu bar icon state
+        MenuBarController.shared.apply(manager: todoManager, updater: updater)
+    }
+
+    /// Call whenever alwaysOnTop setting changes to update all main windows.
+    func applyWindowLevel(_ window: NSWindow) {
+        window.level = todoManager.blockerSettings.alwaysOnTop ? .floating : .normal
+    }
+
+    func applyAlwaysOnTop() {
+        for window in NSApplication.shared.windows {
+            if isDebugWindow(window) { continue }
+            if isMainAppWindow(window) { applyWindowLevel(window) }
         }
     }
     
@@ -2517,6 +2530,70 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 window.setFrame(defaultSize, display: false)
             }
         }
+    }
+}
+
+// MARK: - Menu Bar Controller
+
+/// Manages the optional menu bar status item with a quick-access todo popover.
+final class MenuBarController: NSObject {
+    static let shared = MenuBarController()
+
+    private var statusItem: NSStatusItem?
+    private var popover: NSPopover?
+    private weak var manager: TodoManager?
+    private weak var updater: UpdateManager?
+
+    func apply(manager: TodoManager, updater: UpdateManager) {
+        self.manager = manager
+        self.updater = updater
+        if manager.blockerSettings.showMenuBarIcon {
+            install()
+        } else {
+            remove()
+        }
+    }
+
+    func install() {
+        guard statusItem == nil else { return }
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        if let button = item.button {
+            button.image = NSImage(systemSymbolName: "checkmark.square.fill",
+                                   accessibilityDescription: "AdvancedTodo")
+            button.image?.isTemplate = true
+            button.action = #selector(togglePopover(_:))
+            button.target = self
+            button.toolTip = "AdvancedTodo — click to open"
+        }
+        statusItem = item
+    }
+
+    func remove() {
+        if let item = statusItem {
+            NSStatusBar.system.removeStatusItem(item)
+            statusItem = nil
+        }
+        popover?.close()
+        popover = nil
+    }
+
+    @objc private func togglePopover(_ sender: Any?) {
+        guard let button = statusItem?.button else { return }
+        if let pop = popover, pop.isShown {
+            pop.performClose(sender)
+            return
+        }
+        guard let mgr = manager, let upd = updater else { return }
+        let pop = NSPopover()
+        pop.contentSize = NSSize(width: 420, height: 560)
+        pop.behavior = .transient
+        pop.animates = true
+        let root = MenuBarTodoView()
+            .environmentObject(mgr)
+            .environmentObject(upd)
+        pop.contentViewController = NSHostingController(rootView: root)
+        pop.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        popover = pop
     }
 }
 
@@ -4219,6 +4296,16 @@ struct ContentView: View {
                 blockerPromptController.hide()
             }
         }
+        .onChange(of: manager.blockerSettings.alwaysOnTop) { newVal in
+            for window in NSApplication.shared.windows {
+                guard !isDebugWindow(window), isMainAppWindow(window) else { continue }
+                window.level = newVal ? .floating : .normal
+            }
+        }
+        .onChange(of: manager.blockerSettings.showMenuBarIcon) { newVal in
+            if newVal { MenuBarController.shared.install() }
+            else      { MenuBarController.shared.remove()  }
+        }
         .onChange(of: manager.distractionWarningNonce) { _ in
             // Show the first-stage warning banner
             let name = manager.lastWarningDistraction
@@ -4932,15 +5019,8 @@ struct SettingsRootView: View {
                 WindowSettingsView()
                     .environmentObject(manager)
             } else {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("General")
-                        .font(.title2.bold())
-                    Text("More settings coming soon.")
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                }
-                .padding()
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                GeneralSettingsView()
+                    .environmentObject(manager)
             }
         }
         .frame(minWidth: 820, minHeight: 520)
@@ -5047,6 +5127,239 @@ struct WindowSettingsView: View {
             .padding(20)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+}
+
+// MARK: - General Settings View
+
+struct GeneralSettingsView: View {
+    @EnvironmentObject var manager: TodoManager
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+
+                HStack(alignment: .top) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("General")
+                            .font(.title2.bold())
+                        Text("App-wide behaviour settings.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                }
+
+                Divider()
+
+                // ── Always on Top ─────────────────────────────────────────────
+                GroupBox {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Toggle("Keep window always on top", isOn: Binding(
+                            get: { manager.blockerSettings.alwaysOnTop },
+                            set: { newVal in
+                                manager.blockerSettings.alwaysOnTop = newVal
+                                // Apply immediately to all main windows
+                                for window in NSApplication.shared.windows {
+                                    guard !isDebugWindow(window), isMainAppWindow(window) else { continue }
+                                    window.level = newVal ? .floating : .normal
+                                }
+                            }
+                        ))
+                        .font(.headline)
+
+                        Text("When enabled, the AdvancedTodo window floats above all other windows on every desktop space. Turn this off if you prefer the window to behave like a normal app.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(4)
+                }
+
+                // ── Menu Bar Icon ─────────────────────────────────────────────
+                GroupBox {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Toggle("Show app icon in menu bar", isOn: Binding(
+                            get: { manager.blockerSettings.showMenuBarIcon },
+                            set: { newVal in
+                                manager.blockerSettings.showMenuBarIcon = newVal
+                                if newVal {
+                                    MenuBarController.shared.install()
+                                } else {
+                                    MenuBarController.shared.remove()
+                                }
+                            }
+                        ))
+                        .font(.headline)
+
+                        Text("Adds a ✓ icon to the macOS menu bar. Clicking it opens a compact todo panel so you can quickly add or check off tasks without switching windows. The app keeps running in the background when the panel is closed.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(4)
+                }
+
+                Spacer()
+            }
+            .padding(20)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+}
+
+// MARK: - Menu Bar Quick-Access Todo View
+
+struct MenuBarTodoView: View {
+    @EnvironmentObject var manager: TodoManager
+    @EnvironmentObject var updater: UpdateManager
+    @State private var showingAdd = false
+
+    private var pendingTodos: [TodoItem] {
+        manager.sortedTodos.filter { !$0.isCompleted }.prefix(20).map { $0 }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header
+            HStack {
+                Text("AdvancedTodo")
+                    .font(.headline)
+                Spacer()
+                Button {
+                    showingAdd = true
+                } label: {
+                    Image(systemName: "plus.circle.fill")
+                        .font(.system(size: 18))
+                        .foregroundColor(.accentColor)
+                }
+                .buttonStyle(.plain)
+                .help("Add new task")
+
+                Button {
+                    // Show main window
+                    for window in NSApplication.shared.windows {
+                        if isMainAppWindow(window) {
+                            window.makeKeyAndOrderFront(nil)
+                            NSApp.activate(ignoringOtherApps: true)
+                            break
+                        }
+                    }
+                } label: {
+                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                        .font(.system(size: 14))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Open main window")
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(Color(NSColor.windowBackgroundColor))
+
+            Divider()
+
+            // Focus session status bar
+            if manager.focusPhase == .relaxing || manager.focusPhase == .working {
+                focusStatusBar
+                Divider()
+            }
+
+            // Todo list
+            if pendingTodos.isEmpty {
+                VStack(spacing: 10) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 32))
+                        .foregroundColor(.green)
+                    Text("All done!")
+                        .font(.headline)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding()
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(pendingTodos) { todo in
+                            menuBarTodoRow(todo)
+                            Divider().padding(.leading, 36)
+                        }
+                    }
+                }
+            }
+
+            Divider()
+
+            // Footer
+            HStack {
+                Text("\(manager.sortedTodos.filter { !$0.isCompleted }.count) pending")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text("v2.0")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(Color(NSColor.windowBackgroundColor))
+        }
+        .sheet(isPresented: $showingAdd) {
+            AddEditTodoView(todoToEdit: nil)
+                .environmentObject(manager)
+        }
+    }
+
+    private var focusStatusBar: some View {
+        let isRelax = manager.focusPhase == .relaxing
+        let color   = isRelax ? Color(red: 0.20, green: 0.80, blue: 0.45) : Color(red: 1.00, green: 0.60, blue: 0.15)
+        let label   = isRelax ? "Relaxing" : "Working"
+        let icon    = isRelax ? "moon.fill" : "bolt.fill"
+        return HStack(spacing: 8) {
+            Image(systemName: icon).foregroundColor(color).font(.system(size: 11))
+            Text(label).font(.system(size: 12, weight: .semibold)).foregroundColor(color)
+            Spacer()
+            Text(menuBarTimerLabel)
+                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                .foregroundColor(color)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 7)
+        .background(color.opacity(0.08))
+    }
+
+    private var menuBarTimerLabel: String {
+        let remaining = manager.focusSecondsRemaining(now: Date())
+        let m = remaining / 60
+        let s = remaining % 60
+        return String(format: "%d:%02d", m, s)
+    }
+
+    private func menuBarTodoRow(_ todo: TodoItem) -> some View {
+        HStack(spacing: 10) {
+            Button {
+                manager.toggleCompletion(for: todo.id)
+            } label: {
+                Image(systemName: todo.isCompleted ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 16))
+                    .foregroundColor(todo.isCompleted ? .green : .secondary)
+            }
+            .buttonStyle(.plain)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(todo.title)
+                    .font(.system(size: 13))
+                    .strikethrough(todo.isCompleted)
+                    .lineLimit(1)
+                Text(todo.dueDate, style: .relative)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .contentShape(Rectangle())
     }
 }
 

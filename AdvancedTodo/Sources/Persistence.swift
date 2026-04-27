@@ -98,6 +98,10 @@ struct BlockerSettings: Codable, Equatable {
     var reflections: [ReflectionEntry]
     /// Raw screen-time samples (kept for last 7 days, pruned automatically)
     var screenTimeSamples: [AppUsageSample]
+    /// Keep the main window floating above all other windows
+    var alwaysOnTop: Bool
+    /// Show a menu bar icon that opens a quick-access todo popover
+    var showMenuBarIcon: Bool
 
     static func `default`() -> BlockerSettings {
         BlockerSettings(
@@ -217,7 +221,9 @@ struct BlockerSettings: Codable, Equatable {
             ],
             whitelistedWebsites: [],
             reflections: [],
-            screenTimeSamples: []
+            screenTimeSamples: [],
+            alwaysOnTop: true,
+            showMenuBarIcon: false
         )
     }
 }
@@ -245,6 +251,8 @@ extension BlockerSettings {
         case whitelistedWebsites
         case reflections
         case screenTimeSamples
+        case alwaysOnTop
+        case showMenuBarIcon
     }
 
     enum LegacyCodingKeys: String, CodingKey {
@@ -280,6 +288,8 @@ extension BlockerSettings {
         whitelistedWebsites = try c.decodeIfPresent([String].self, forKey: .whitelistedWebsites) ?? []
         reflections = try c.decodeIfPresent([ReflectionEntry].self, forKey: .reflections) ?? []
         screenTimeSamples = try c.decodeIfPresent([AppUsageSample].self, forKey: .screenTimeSamples) ?? []
+        alwaysOnTop = try c.decodeIfPresent(Bool.self, forKey: .alwaysOnTop) ?? true
+        showMenuBarIcon = try c.decodeIfPresent(Bool.self, forKey: .showMenuBarIcon) ?? false
     }
 }
 
