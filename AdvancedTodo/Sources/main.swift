@@ -122,6 +122,7 @@ final class TodoManager: ObservableObject {
 
     private let checkpointDelay: TimeInterval = 5
     private var lastDistractionPromptAt: Date?
+    private var lastWarningAt: Date?          // when the first-stage warning was shown
     private var consecutiveShortsStrikes: Int = 0
     private var autoReopenTimer: Timer?
     private var windowClosedAt: Date?
@@ -212,6 +213,24 @@ final class TodoManager: ObservableObject {
     var lastAutoClosedDistraction: String = "" {
         didSet {
             if oldValue != lastAutoClosedDistraction {
+                objectWillChange.send()
+            }
+        }
+    }
+
+    /// Incremented to trigger the first-stage warning toast (non-blocking).
+    var distractionWarningNonce: Int = 0 {
+        didSet {
+            if oldValue != distractionWarningNonce {
+                objectWillChange.send()
+            }
+        }
+    }
+
+    /// Name shown in the first-stage warning toast.
+    var lastWarningDistraction: String = "" {
+        didSet {
+            if oldValue != lastWarningDistraction {
                 objectWillChange.send()
             }
         }
@@ -1163,6 +1182,9 @@ final class TodoManager: ObservableObject {
     }
 
     private func handleWebsiteMatch(_ match: DistractionDetector.MatchResult, pid: pid_t) {
+        // ── Relax phase: do nothing at all — user is allowed to enjoy entertainment ──
+        if focusPhase == .relaxing { return }
+
         if match.action == .autoClose {
             // During work phase, close immediately without waiting for 2 strikes
             if shouldForceCloseEntertainmentDuringWork() {
@@ -1176,19 +1198,18 @@ final class TodoManager: ObservableObject {
                 consecutiveShortsStrikes = 0
                 return
             }
+            // Idle phase: two-stage warning → prompt
             handleAutoCloseStrike(match: match.label, pid: pid) {
-                // Auto-close tab requires Accessibility trust.
-                guard blockerSettings.accessibilityPermissionGranted,
-                      AXIsProcessTrusted() else {
-                    return
-                }
+                guard self.blockerSettings.accessibilityPermissionGranted,
+                      AXIsProcessTrusted() else { return }
                 DistractionDetector.closeDistractionTab(pid: pid)
             }
             return
         }
 
         consecutiveShortsStrikes = 0
-        // During work phase, also close reminder-only sites immediately
+
+        // ── Work phase: close reminder-only sites immediately too ──
         if shouldForceCloseEntertainmentDuringWork() {
             if blockerSettings.autoCloseEnabled,
                blockerSettings.accessibilityPermissionGranted,
@@ -1199,11 +1220,16 @@ final class TodoManager: ObservableObject {
             }
             return
         }
-        triggerPromptIfNeeded()
+
+        // Idle phase: two-stage warning → prompt
+        triggerWarningOrPrompt()
     }
 
     /// Tracks consecutive auto-close detections and performs configured close action on strike 2.
     private func handleAutoCloseStrike(match: String, pid: pid_t, closeAction: () -> Void) {
+        // Relax phase: completely silent
+        if focusPhase == .relaxing { return }
+
         consecutiveShortsStrikes += 1
         if consecutiveShortsStrikes >= 2 {
             consecutiveShortsStrikes = 0
@@ -1214,38 +1240,55 @@ final class TodoManager: ObservableObject {
             }
         }
 
-        triggerPromptIfNeeded()
+        triggerWarningOrPrompt()
     }
 
-    private func triggerPromptIfNeeded() {
-        // Don't show the reminder popup during an active focus session
-        // (relax or work phase) — the session is already managing the user's time.
+    /// Two-stage distraction response (idle phase only):
+    ///   Stage 1 — show a non-blocking warning toast, start 60s clock.
+    ///   Stage 2 — after 60s of continued distraction, show the full-screen timer picker.
+    private func triggerWarningOrPrompt() {
+        // Only active during idle (or celebrating — treat same as idle for prompting)
         guard focusPhase == .idle || focusPhase == .celebrating else { return }
 
         let now = Date()
-        let interval = TimeInterval(blockerSettings.blockDurationSeconds)
-        if let last = lastDistractionPromptAt, now.timeIntervalSince(last) < interval {
-            // If the user dismissed the prompt without choosing (still idle),
-            // re-show it immediately — don't let them escape via cooldown.
-            if focusPhase == .idle && reminderReopenPending {
+
+        // ── Stage 2: full-screen prompt ──────────────────────────────────────
+        // Fire if: a warning was already shown AND 60 s have elapsed since it.
+        if let warnedAt = lastWarningAt, now.timeIntervalSince(warnedAt) >= 60 {
+            // Respect the prompt cooldown so we don't spam if the user keeps
+            // dismissing without choosing (reminderReopenPending handles that).
+            let promptInterval = TimeInterval(blockerSettings.blockDurationSeconds)
+            let promptReady = lastDistractionPromptAt.map { now.timeIntervalSince($0) >= promptInterval } ?? true
+
+            if promptReady || (focusPhase == .idle && reminderReopenPending) {
+                lastWarningAt = nil          // reset so next cycle starts fresh
                 lastDistractionPromptAt = now
+                reminderReopenPending = true
                 blockerPromptNonce += 1
                 if debugModeEnabled {
-                    print("[Blocker] Re-showing prompt (dismissed without choice). Distraction: \(latestDetectedDistraction ?? "none")")
+                    print("[Blocker] Stage 2 — showing full prompt. Distraction: \(latestDetectedDistraction ?? "none")")
                 }
-                return
-            }
-            if debugModeEnabled {
-                print("[Blocker] Prompt cooldown active. \(Int(interval - now.timeIntervalSince(last)))s remaining")
             }
             return
         }
-        lastDistractionPromptAt = now
-        reminderReopenPending = true   // mark as pending until user makes a choice
-        blockerPromptNonce += 1
-        if debugModeEnabled {
-            print("[Blocker] Triggering prompt. Distraction: \(latestDetectedDistraction ?? "none")")
+
+        // ── Stage 1: warning toast ────────────────────────────────────────────
+        // Fire only if no warning is currently pending.
+        if lastWarningAt == nil {
+            lastWarningAt = now
+            lastWarningDistraction = latestDetectedDistraction ?? "a distraction"
+            distractionWarningNonce += 1
+            if debugModeEnabled {
+                print("[Blocker] Stage 1 — showing warning toast. Distraction: \(latestDetectedDistraction ?? "none")")
+            }
         }
+        // If a warning is already pending and < 60 s have passed, do nothing —
+        // just wait for the 60 s window to expire.
+    }
+
+    // Keep old name as a passthrough so call-sites that call triggerPromptIfNeeded directly still work
+    private func triggerPromptIfNeeded() {
+        triggerWarningOrPrompt()
     }
 
     /// Subscribe to workspace notifications so detection fires instantly on app switch,
@@ -1348,6 +1391,7 @@ final class TodoManager: ObservableObject {
         focusPhaseStartedAt = Date()
         focusPhase = .relaxing
         reminderReopenPending = false   // user made a choice — stop re-opening
+        lastWarningAt = nil             // reset warning clock
         lastDistractionPromptAt = Date() // suppress prompt during session
         startMenuBarCountdown()
     }
@@ -1386,6 +1430,7 @@ final class TodoManager: ObservableObject {
         focusRelaxSeconds = 0
         focusWorkSeconds = 0
         reminderReopenPending = false
+        lastWarningAt = nil
         stopMenuBarCountdown()
         lastDistractionPromptAt = nil
     }
@@ -1463,6 +1508,7 @@ final class TodoManager: ObservableObject {
     /// Add an app or website to the whitelist from the reminder popup.
     func addToWhitelistFromReminder(name: String, isWebsite: Bool) {
         reminderReopenPending = false   // user made a choice
+        lastWarningAt = nil
         if isWebsite {
             addWhitelistedWebsite(name)
         } else {
@@ -2922,6 +2968,9 @@ struct ContentView: View {
     @State private var latestSidebarSize: CGSize = .zero
     @State private var latestDetailSize: CGSize = .zero
     @State private var blockerPromptController = BlockerPromptWindowController()
+    @State private var showWarningBanner = false
+    @State private var warningBannerText = ""
+    @State private var warningCountdown = 60
 
     private let blockerPollingTimer = Timer.publish(every: 6, on: .main, in: .common).autoconnect()
 
@@ -3347,6 +3396,8 @@ struct ContentView: View {
             }
         }
         .onChange(of: manager.blockerPromptNonce) { _ in
+            // Hide the warning banner — the full prompt is taking over
+            withAnimation(.easeOut(duration: 0.3)) { showWarningBanner = false }
             blockerPromptController.show(manager: manager)
         }
         .onChange(of: manager.focusPhase) { phase in
@@ -3358,6 +3409,31 @@ struct ContentView: View {
             if phase == .idle {
                 blockerPromptController.hide()
             }
+        }
+        .onChange(of: manager.distractionWarningNonce) { _ in
+            // Show the first-stage warning banner
+            let name = manager.lastWarningDistraction
+            warningBannerText = "⚠️  Distraction detected: \(name)"
+            warningCountdown = 60
+            withAnimation(.spring(response: 0.4, dampingFraction: 0.75)) {
+                showWarningBanner = true
+            }
+            // Tick the countdown every second and auto-dismiss after 60 s
+            // (the full prompt will fire at that point anyway)
+            let startNonce = manager.distractionWarningNonce
+            func tick(_ remaining: Int) {
+                guard remaining > 0, manager.distractionWarningNonce == startNonce else {
+                    if manager.distractionWarningNonce == startNonce {
+                        withAnimation(.easeOut(duration: 0.4)) { showWarningBanner = false }
+                    }
+                    return
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                    warningCountdown = remaining - 1
+                    tick(remaining - 1)
+                }
+            }
+            tick(60)
         }
         .safeAreaInset(edge: .bottom) {
             if manager.debugModeEnabled {
@@ -3372,6 +3448,62 @@ struct ContentView: View {
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
                 .background(.ultraThinMaterial)
+            }
+        }
+        // ── First-stage warning banner ────────────────────────────────────────
+        .overlay(alignment: .top) {
+            if showWarningBanner {
+                HStack(spacing: 14) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 18, weight: .bold))
+                        .foregroundColor(.black)
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(warningBannerText)
+                            .font(.system(size: 14, weight: .bold))
+                            .foregroundColor(.black)
+                        Text("Focus prompt in \(warningCountdown)s — choose a session plan or keep working")
+                            .font(.system(size: 12))
+                            .foregroundColor(.black.opacity(0.75))
+                    }
+
+                    Spacer()
+
+                    // Countdown ring
+                    ZStack {
+                        Circle()
+                            .stroke(Color.black.opacity(0.2), lineWidth: 3)
+                            .frame(width: 34, height: 34)
+                        Circle()
+                            .trim(from: 0, to: CGFloat(warningCountdown) / 60.0)
+                            .stroke(Color.black, style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                            .frame(width: 34, height: 34)
+                            .rotationEffect(.degrees(-90))
+                            .animation(.linear(duration: 1), value: warningCountdown)
+                        Text("\(warningCountdown)")
+                            .font(.system(size: 11, weight: .bold, design: .monospaced))
+                            .foregroundColor(.black)
+                    }
+
+                    Button {
+                        withAnimation(.easeOut(duration: 0.3)) { showWarningBanner = false }
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundColor(.black.opacity(0.6))
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 18)
+                .padding(.vertical, 12)
+                .background(
+                    RoundedRectangle(cornerRadius: 12)
+                        .fill(Color.orange)
+                        .shadow(color: .black.opacity(0.25), radius: 10, x: 0, y: 4)
+                )
+                .padding(.horizontal, 16)
+                .padding(.top, 10)
+                .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
     }
