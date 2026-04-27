@@ -275,6 +275,7 @@ final class TodoManager: ObservableObject {
         try? fileManager.createDirectory(at: checkpointsDirectoryURL, withIntermediateDirectories: true)
         loadState()
         startWorkspaceObservation()
+        startScreenTimeTracking()
         
         // Auto-sync and prompt for accessibility permission on startup.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
@@ -594,7 +595,7 @@ final class TodoManager: ObservableObject {
             selectedSidebarKey = "todo"
         }
 
-        if selectedBoard() == nil && selectedSidebarKey != "todo" && selectedSidebarKey != "trash" && selectedSidebarKey != "reflections" {
+        if selectedBoard() == nil && selectedSidebarKey != "todo" && selectedSidebarKey != "trash" && selectedSidebarKey != "reflections" && selectedSidebarKey != "screentime" {
             selectedSidebarKey = "todo"
         }
 
@@ -1545,6 +1546,143 @@ final class TodoManager: ObservableObject {
 
     func deleteReflection(at offsets: IndexSet) {
         blockerSettings.reflections.remove(atOffsets: offsets)
+    }
+
+    // MARK: - Screen Time Tracking
+
+    private var screenTimeTimer: Timer?
+    private let screenTimeSampleInterval: TimeInterval = 30
+
+    /// Start the 30-second screen-time sampling timer.
+    func startScreenTimeTracking() {
+        guard screenTimeTimer == nil else { return }
+        screenTimeTimer = Timer.scheduledTimer(
+            withTimeInterval: screenTimeSampleInterval,
+            repeats: true
+        ) { [weak self] _ in
+            self?.recordScreenTimeSample()
+        }
+        RunLoop.main.add(screenTimeTimer!, forMode: .common)
+    }
+
+    /// Record one 30-second sample for the current frontmost app.
+    private func recordScreenTimeSample() {
+        guard let app = NSWorkspace.shared.frontmostApplication else { return }
+        // Skip our own app
+        if app.bundleIdentifier == Bundle.main.bundleIdentifier { return }
+
+        let appName  = app.localizedName ?? "Unknown"
+        let bundleID = app.bundleIdentifier ?? ""
+
+        let isEntertainment = isEntertainmentApp(appName: appName, bundleID: bundleID)
+        let isWork = focusPhase == .working
+
+        let sample = AppUsageSample(
+            appName: appName,
+            bundleID: bundleID,
+            timestamp: Date(),
+            durationSeconds: Int(screenTimeSampleInterval),
+            isEntertainment: isEntertainment,
+            isWork: isWork
+        )
+
+        blockerSettings.screenTimeSamples.append(sample)
+        pruneOldScreenTimeSamples()
+    }
+
+    /// Keep only the last 7 days of samples to avoid unbounded growth.
+    private func pruneOldScreenTimeSamples() {
+        let cutoff = Calendar.current.date(byAdding: .day, value: -7, to: Date()) ?? Date()
+        blockerSettings.screenTimeSamples.removeAll { $0.timestamp < cutoff }
+    }
+
+    /// Returns true if the app is classified as entertainment.
+    private func isEntertainmentApp(appName: String, bundleID: String) -> Bool {
+        let lower = appName.lowercased()
+        let lowerBundle = bundleID.lowercased()
+        // Check reminder/auto-close lists
+        let inReminder = blockerSettings.reminderApps.contains(where: {
+            let n = $0.lowercased(); return lower.contains(n) || lowerBundle.contains(n)
+        })
+        let inAutoClose = blockerSettings.autoCloseApps.contains(where: {
+            let n = $0.lowercased(); return lower.contains(n) || lowerBundle.contains(n)
+        })
+        // Check keywords
+        let inKeyword = blockerSettings.blockedKeywords.contains(where: {
+            lower.contains($0.lowercased()) || lowerBundle.contains($0.lowercased())
+        })
+        return inReminder || inAutoClose || inKeyword
+    }
+
+    // MARK: - Screen Time Aggregation
+
+    /// Returns samples for a specific calendar day.
+    func screenTimeSamples(for date: Date) -> [AppUsageSample] {
+        let cal = Calendar.current
+        return blockerSettings.screenTimeSamples.filter {
+            cal.isDate($0.timestamp, inSameDayAs: date)
+        }
+    }
+
+    /// Total seconds the computer was actively used on a given day.
+    func totalComputerSeconds(for date: Date) -> Int {
+        screenTimeSamples(for: date).reduce(0) { $0 + $1.durationSeconds }
+    }
+
+    /// Total entertainment seconds on a given day.
+    func entertainmentSeconds(for date: Date) -> Int {
+        screenTimeSamples(for: date).filter { $0.isEntertainment }.reduce(0) { $0 + $1.durationSeconds }
+    }
+
+    /// Total work-phase seconds on a given day.
+    func workSeconds(for date: Date) -> Int {
+        screenTimeSamples(for: date).filter { $0.isWork }.reduce(0) { $0 + $1.durationSeconds }
+    }
+
+    /// Per-app aggregated usage for a given day, sorted by total time descending.
+    func appUsage(for date: Date) -> [DailyAppUsage] {
+        let samples = screenTimeSamples(for: date)
+        var map: [String: DailyAppUsage] = [:]
+        let dayStart = Calendar.current.startOfDay(for: date)
+
+        for s in samples {
+            let key = s.bundleID.isEmpty ? s.appName : s.bundleID
+            if map[key] == nil {
+                map[key] = DailyAppUsage(date: dayStart, appName: s.appName, bundleID: s.bundleID)
+            }
+            map[key]!.totalSeconds         += s.durationSeconds
+            if s.isEntertainment { map[key]!.entertainmentSeconds += s.durationSeconds }
+            if s.isWork          { map[key]!.workSeconds          += s.durationSeconds }
+        }
+        return map.values.sorted { $0.totalSeconds > $1.totalSeconds }
+    }
+
+    /// 24 hourly buckets for the activity graph on a given day.
+    func hourlyBuckets(for date: Date) -> [HourlyBucket] {
+        var buckets = (0..<24).map { HourlyBucket(hour: $0, totalSeconds: 0, entertainmentSeconds: 0, workSeconds: 0) }
+        for s in screenTimeSamples(for: date) {
+            let hour = Calendar.current.component(.hour, from: s.timestamp)
+            buckets[hour].totalSeconds         += s.durationSeconds
+            if s.isEntertainment { buckets[hour].entertainmentSeconds += s.durationSeconds }
+            if s.isWork          { buckets[hour].workSeconds          += s.durationSeconds }
+        }
+        return buckets
+    }
+
+    /// The last 7 days available in the samples (most recent first).
+    func screenTimeDays() -> [Date] {
+        let cal = Calendar.current
+        var seen = Set<String>()
+        var days: [Date] = []
+        let fmt = DateFormatter()
+        fmt.dateFormat = "yyyy-MM-dd"
+        for s in blockerSettings.screenTimeSamples.sorted(by: { $0.timestamp > $1.timestamp }) {
+            let key = fmt.string(from: s.timestamp)
+            if seen.insert(key).inserted {
+                days.append(cal.startOfDay(for: s.timestamp))
+            }
+        }
+        return days
     }
 
     func scheduleCheckpointWrite() {
@@ -3264,6 +3402,325 @@ struct ReflectionsView: View {
     }
 }
 
+// MARK: - Screen Time View
+
+struct ScreenTimeView: View {
+    @EnvironmentObject var manager: TodoManager
+    @State private var selectedDay: Date = Calendar.current.startOfDay(for: Date())
+    @State private var now = Date()
+
+    private let accentGreen  = Color(red: 0.20, green: 0.80, blue: 0.45)
+    private let accentOrange = Color(red: 1.00, green: 0.60, blue: 0.15)
+    private let accentRed    = Color(red: 0.90, green: 0.25, blue: 0.25)
+    private let accentBlue   = Color(red: 0.25, green: 0.55, blue: 1.00)
+
+    // ── Computed stats for selected day ──────────────────────────────────────
+    private var totalSecs: Int        { manager.totalComputerSeconds(for: selectedDay) }
+    private var entertainSecs: Int    { manager.entertainmentSeconds(for: selectedDay) }
+    private var workSecs: Int         { manager.workSeconds(for: selectedDay) }
+    private var otherSecs: Int        { max(0, totalSecs - entertainSecs - workSecs) }
+    private var entertainPct: Double  { totalSecs > 0 ? Double(entertainSecs) / Double(totalSecs) : 0 }
+    private var workPct: Double       { totalSecs > 0 ? Double(workSecs)      / Double(totalSecs) : 0 }
+    private var appUsage: [DailyAppUsage] { manager.appUsage(for: selectedDay) }
+    private var hourly: [HourlyBucket]   { manager.hourlyBuckets(for: selectedDay) }
+    private var days: [Date]             { manager.screenTimeDays() }
+
+    /// Health colour: green = mostly work / low entertainment,
+    /// orange = moderate entertainment, red = high entertainment / low work.
+    private var healthColor: Color {
+        if entertainPct < 0.25 { return accentGreen }
+        if entertainPct < 0.50 { return accentOrange }
+        return accentRed
+    }
+
+    private var isToday: Bool {
+        Calendar.current.isDateInToday(selectedDay)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // ── Header ────────────────────────────────────────────────────────
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Screen Time")
+                        .font(.title2.bold())
+                    Text(isToday ? "Today" : selectedDay.formatted(date: .abbreviated, time: .omitted))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                // Day picker
+                if days.count > 1 {
+                    Picker("Day", selection: $selectedDay) {
+                        ForEach(days, id: \.self) { day in
+                            Text(dayLabel(day)).tag(day)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .frame(width: 130)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+
+            Divider()
+
+            if totalSecs == 0 {
+                emptyState
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        statCards
+                        activityGraph
+                        appBreakdown
+                    }
+                    .padding(16)
+                }
+            }
+        }
+        .onReceive(Timer.publish(every: 60, on: .main, in: .common).autoconnect()) { v in
+            now = v
+            // Refresh today's data every minute
+            if isToday { selectedDay = Calendar.current.startOfDay(for: Date()) }
+        }
+    }
+
+    // ── Empty state ───────────────────────────────────────────────────────────
+    private var emptyState: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "chart.bar.xaxis")
+                .font(.system(size: 48))
+                .foregroundStyle(.secondary)
+            Text("No data yet")
+                .font(.headline)
+                .foregroundStyle(.secondary)
+            Text("Screen time is recorded every 30 seconds while the app is running.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding()
+    }
+
+    // ── Three stat cards ──────────────────────────────────────────────────────
+    private var statCards: some View {
+        HStack(spacing: 12) {
+            statCard(
+                icon: "desktopcomputer",
+                title: "Computer Use",
+                value: formatDuration(totalSecs),
+                subtitle: "over 24 hours",
+                color: accentBlue
+            )
+            statCard(
+                icon: "tv.fill",
+                title: "Entertainment",
+                value: formatDuration(entertainSecs),
+                subtitle: String(format: "%.0f%% of total", entertainPct * 100),
+                color: healthColor
+            )
+            statCard(
+                icon: "bolt.fill",
+                title: "Focus Work",
+                value: formatDuration(workSecs),
+                subtitle: String(format: "%.0f%% of total", workPct * 100),
+                color: workPct > 0.3 ? accentGreen : accentOrange
+            )
+        }
+    }
+
+    private func statCard(icon: String, title: String, value: String, subtitle: String, color: Color) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: icon)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(color)
+                Text(title)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
+            Text(value)
+                .font(.system(size: 22, weight: .bold, design: .rounded))
+                .foregroundColor(color)
+            Text(subtitle)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(color.opacity(0.08))
+                .overlay(RoundedRectangle(cornerRadius: 12).stroke(color.opacity(0.2), lineWidth: 1))
+        )
+    }
+
+    // ── Hourly activity graph ─────────────────────────────────────────────────
+    private var activityGraph: some View {
+        let maxSecs = hourly.map { $0.totalSeconds }.max() ?? 1
+        let currentHour = Calendar.current.component(.hour, from: now)
+
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Activity Throughout the Day")
+                    .font(.system(size: 13, weight: .semibold))
+                Spacer()
+                // Legend
+                HStack(spacing: 10) {
+                    legendDot(color: accentBlue,   label: "Other")
+                    legendDot(color: accentOrange,  label: "Entertainment")
+                    legendDot(color: accentGreen,   label: "Work")
+                }
+                .font(.system(size: 10))
+            }
+
+            GeometryReader { geo in
+                let barW = (geo.size.width - CGFloat(23) * 3) / 24
+                HStack(alignment: .bottom, spacing: 3) {
+                    ForEach(hourly, id: \.hour) { bucket in
+                        let total = CGFloat(bucket.totalSeconds)
+                        let maxH  = geo.size.height - 18
+                        let totalH = maxSecs > 0 ? (total / CGFloat(maxSecs)) * maxH : 0
+                        let entertainH = total > 0 ? (CGFloat(bucket.entertainmentSeconds) / total) * totalH : 0
+                        let workH      = total > 0 ? (CGFloat(bucket.workSeconds)          / total) * totalH : 0
+                        let otherH     = max(0, totalH - entertainH - workH)
+
+                        VStack(spacing: 0) {
+                            Spacer(minLength: 0)
+                            // Stacked bar: work (bottom) → entertainment → other (top)
+                            VStack(spacing: 0) {
+                                Rectangle().fill(accentBlue.opacity(0.7)).frame(height: otherH)
+                                Rectangle().fill(accentOrange.opacity(0.85)).frame(height: entertainH)
+                                Rectangle().fill(accentGreen.opacity(0.9)).frame(height: workH)
+                            }
+                            .frame(width: barW)
+                            .clipShape(RoundedRectangle(cornerRadius: 2))
+                            .opacity(isToday && bucket.hour > currentHour ? 0.25 : 1)
+
+                            // Hour label every 4 hours
+                            Text(bucket.hour % 4 == 0 ? "\(bucket.hour)" : "")
+                                .font(.system(size: 8, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                                .frame(height: 14)
+                        }
+                    }
+                }
+            }
+            .frame(height: 110)
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color(NSColor.controlBackgroundColor))
+        )
+    }
+
+    private func legendDot(color: Color, label: String) -> some View {
+        HStack(spacing: 4) {
+            Circle().fill(color).frame(width: 7, height: 7)
+            Text(label).foregroundStyle(.secondary)
+        }
+    }
+
+    // ── Per-app breakdown ─────────────────────────────────────────────────────
+    private var appBreakdown: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("App Breakdown")
+                .font(.system(size: 13, weight: .semibold))
+
+            if appUsage.isEmpty {
+                Text("No app data for this day.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                let topTotal = appUsage.first?.totalSeconds ?? 1
+                ForEach(appUsage.prefix(15)) { usage in
+                    appRow(usage, topTotal: topTotal)
+                }
+            }
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color(NSColor.controlBackgroundColor))
+        )
+    }
+
+    private func appRow(_ usage: DailyAppUsage, topTotal: Int) -> some View {
+        let barFraction = topTotal > 0 ? CGFloat(usage.totalSeconds) / CGFloat(topTotal) : 0
+        let color: Color = usage.entertainmentSeconds > usage.workSeconds
+            ? (Double(usage.entertainmentSeconds) / Double(max(1, usage.totalSeconds)) > 0.5 ? accentOrange : accentBlue)
+            : accentGreen
+
+        return VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                // App icon placeholder
+                RoundedRectangle(cornerRadius: 5)
+                    .fill(color.opacity(0.2))
+                    .frame(width: 22, height: 22)
+                    .overlay(
+                        Text(String(usage.appName.prefix(1)).uppercased())
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundColor(color)
+                    )
+
+                Text(usage.appName)
+                    .font(.system(size: 13, weight: .medium))
+                    .lineLimit(1)
+
+                Spacer()
+
+                Text(formatDuration(usage.totalSeconds))
+                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(.secondary)
+
+                // Health dot
+                Circle()
+                    .fill(usage.entertainmentSeconds > usage.workSeconds ? healthColorFor(usage) : accentGreen)
+                    .frame(width: 8, height: 8)
+            }
+
+            // Progress bar
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 3)
+                        .fill(Color.secondary.opacity(0.12))
+                        .frame(height: 5)
+                    RoundedRectangle(cornerRadius: 3)
+                        .fill(color.opacity(0.7))
+                        .frame(width: geo.size.width * barFraction, height: 5)
+                }
+            }
+            .frame(height: 5)
+        }
+        .padding(.vertical, 3)
+    }
+
+    private func healthColorFor(_ usage: DailyAppUsage) -> Color {
+        let pct = Double(usage.entertainmentSeconds) / Double(max(1, usage.totalSeconds))
+        if pct < 0.25 { return accentGreen }
+        if pct < 0.50 { return accentOrange }
+        return accentRed
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+    private func formatDuration(_ seconds: Int) -> String {
+        if seconds < 60  { return "\(seconds)s" }
+        let m = seconds / 60
+        let h = m / 60
+        let rem = m % 60
+        if h > 0 { return "\(h)h \(rem)m" }
+        return "\(m)m"
+    }
+
+    private func dayLabel(_ date: Date) -> String {
+        if Calendar.current.isDateInToday(date)     { return "Today" }
+        if Calendar.current.isDateInYesterday(date) { return "Yesterday" }
+        return date.formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day())
+    }
+}
+
 struct SidebarSizePreferenceKey: PreferenceKey {
     static var defaultValue: CGSize = .zero
 
@@ -3371,6 +3828,28 @@ struct ContentView: View {
                         Divider()
 
                         sidebarSelectionRow(
+                            title: "Reflections (\(manager.blockerSettings.reflections.count))",
+                            isSelected: manager.selectedSidebarKey == "reflections",
+                            isDimmed: manager.blockerSettings.reflections.isEmpty
+                        ) {
+                            manager.selectedSidebarKey = "reflections"
+                        } menu: {
+                            EmptyView()
+                        }
+
+                        sidebarSelectionRow(
+                            title: "Screen Time",
+                            isSelected: manager.selectedSidebarKey == "screentime",
+                            isDimmed: false
+                        ) {
+                            manager.selectedSidebarKey = "screentime"
+                        } menu: {
+                            EmptyView()
+                        }
+
+                        Divider()
+
+                        sidebarSelectionRow(
                             title: "Trash (\(manager.trashedNoteBoards.count))",
                             isSelected: manager.selectedSidebarKey == "trash",
                             isDimmed: manager.trashedNoteBoards.isEmpty
@@ -3381,18 +3860,6 @@ struct ContentView: View {
                                 manager.emptyTrash()
                             }
                             .disabled(manager.trashedNoteBoards.isEmpty)
-                        }
-
-                        Divider()
-
-                        sidebarSelectionRow(
-                            title: "Reflections (\(manager.blockerSettings.reflections.count))",
-                            isSelected: manager.selectedSidebarKey == "reflections",
-                            isDimmed: manager.blockerSettings.reflections.isEmpty
-                        ) {
-                            manager.selectedSidebarKey = "reflections"
-                        } menu: {
-                            EmptyView()
                         }
                     }
                 }
@@ -3438,6 +3905,10 @@ struct ContentView: View {
                         .frame(maxHeight: .infinity)
                 } else if manager.selectedSidebarKey == "reflections" {
                     ReflectionsView()
+                        .environmentObject(manager)
+                        .frame(maxHeight: .infinity)
+                } else if manager.selectedSidebarKey == "screentime" {
+                    ScreenTimeView()
                         .environmentObject(manager)
                         .frame(maxHeight: .infinity)
                 } else {

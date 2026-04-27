@@ -21,6 +21,48 @@ struct ReflectionEntry: Identifiable, Codable, Equatable {
     }
 }
 
+// MARK: - Screen Time Models
+
+/// One 30-second sample of the frontmost app.
+struct AppUsageSample: Codable, Equatable {
+    var appName: String
+    var bundleID: String
+    var timestamp: Date          // when the sample was taken
+    var durationSeconds: Int     // always 30 for a full sample
+    var isEntertainment: Bool    // classified at record time
+    var isWork: Bool             // classified at record time (focus work phase)
+}
+
+/// Aggregated per-app stats for a single calendar day.
+struct DailyAppUsage: Identifiable, Codable, Equatable {
+    var id: UUID
+    var date: Date               // midnight of the day (normalised)
+    var appName: String
+    var bundleID: String
+    var totalSeconds: Int
+    var entertainmentSeconds: Int
+    var workSeconds: Int
+
+    init(id: UUID = UUID(), date: Date, appName: String, bundleID: String,
+         totalSeconds: Int = 0, entertainmentSeconds: Int = 0, workSeconds: Int = 0) {
+        self.id = id
+        self.date = date
+        self.appName = appName
+        self.bundleID = bundleID
+        self.totalSeconds = totalSeconds
+        self.entertainmentSeconds = entertainmentSeconds
+        self.workSeconds = workSeconds
+    }
+}
+
+/// One hourly bucket for the activity graph (0–23).
+struct HourlyBucket: Codable, Equatable {
+    var hour: Int                // 0–23
+    var totalSeconds: Int
+    var entertainmentSeconds: Int
+    var workSeconds: Int
+}
+
 // MARK: - Focus Session State
 
 enum FocusPhase: String, Codable {
@@ -54,6 +96,8 @@ struct BlockerSettings: Codable, Equatable {
     var whitelistedWebsites: [String]
     /// Reflection journal entries
     var reflections: [ReflectionEntry]
+    /// Raw screen-time samples (kept for last 7 days, pruned automatically)
+    var screenTimeSamples: [AppUsageSample]
 
     static func `default`() -> BlockerSettings {
         BlockerSettings(
@@ -172,7 +216,8 @@ struct BlockerSettings: Codable, Equatable {
                 "Visual Studio Code", "Visual Studio"
             ],
             whitelistedWebsites: [],
-            reflections: []
+            reflections: [],
+            screenTimeSamples: []
         )
     }
 }
@@ -199,6 +244,7 @@ extension BlockerSettings {
         case whitelistedApps
         case whitelistedWebsites
         case reflections
+        case screenTimeSamples
     }
 
     enum LegacyCodingKeys: String, CodingKey {
@@ -233,6 +279,7 @@ extension BlockerSettings {
         whitelistedApps = try c.decodeIfPresent([String].self, forKey: .whitelistedApps) ?? BlockerSettings.default().whitelistedApps
         whitelistedWebsites = try c.decodeIfPresent([String].self, forKey: .whitelistedWebsites) ?? []
         reflections = try c.decodeIfPresent([ReflectionEntry].self, forKey: .reflections) ?? []
+        screenTimeSamples = try c.decodeIfPresent([AppUsageSample].self, forKey: .screenTimeSamples) ?? []
     }
 }
 
