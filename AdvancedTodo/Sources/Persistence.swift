@@ -1,6 +1,35 @@
 import Foundation
 import AppKit
 
+// MARK: - Reflection Entry
+
+struct ReflectionEntry: Identifiable, Codable, Equatable {
+    var id: UUID
+    var date: Date
+    var workDescription: String
+    var rating: Int // 1-5
+    var relaxMinutes: Int
+    var workMinutes: Int
+
+    init(id: UUID = UUID(), date: Date = Date(), workDescription: String, rating: Int, relaxMinutes: Int, workMinutes: Int) {
+        self.id = id
+        self.date = date
+        self.workDescription = workDescription
+        self.rating = rating
+        self.relaxMinutes = relaxMinutes
+        self.workMinutes = workMinutes
+    }
+}
+
+// MARK: - Focus Session State
+
+enum FocusPhase: String, Codable {
+    case idle
+    case relaxing   // user is in relax period — entertainment allowed
+    case working    // user is in work period — entertainment blocked
+    case celebrating // work session done, showing congrats + reflection
+}
+
 struct BlockerSettings: Codable, Equatable {
     var isEnabled: Bool
     var appMonitoringPermissionGranted: Bool
@@ -23,6 +52,8 @@ struct BlockerSettings: Codable, Equatable {
     var whitelistedApps: [String]
     /// Websites whitelisted from ALL blocking — never trigger reminder or auto-close.
     var whitelistedWebsites: [String]
+    /// Reflection journal entries
+    var reflections: [ReflectionEntry]
 
     static func `default`() -> BlockerSettings {
         BlockerSettings(
@@ -140,7 +171,8 @@ struct BlockerSettings: Codable, Equatable {
                 "Microsoft Edge", "OneDrive", "Microsoft To Do",
                 "Visual Studio Code", "Visual Studio"
             ],
-            whitelistedWebsites: []
+            whitelistedWebsites: [],
+            reflections: []
         )
     }
 }
@@ -166,6 +198,7 @@ extension BlockerSettings {
         case motivationalPhrases
         case whitelistedApps
         case whitelistedWebsites
+        case reflections
     }
 
     enum LegacyCodingKeys: String, CodingKey {
@@ -199,6 +232,7 @@ extension BlockerSettings {
         motivationalPhrases = try c.decodeIfPresent([String].self, forKey: .motivationalPhrases) ?? BlockerSettings.default().motivationalPhrases
         whitelistedApps = try c.decodeIfPresent([String].self, forKey: .whitelistedApps) ?? BlockerSettings.default().whitelistedApps
         whitelistedWebsites = try c.decodeIfPresent([String].self, forKey: .whitelistedWebsites) ?? []
+        reflections = try c.decodeIfPresent([ReflectionEntry].self, forKey: .reflections) ?? []
     }
 }
 

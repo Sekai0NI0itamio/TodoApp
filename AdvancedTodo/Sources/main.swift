@@ -126,6 +126,31 @@ final class TodoManager: ObservableObject {
     private var autoReopenTimer: Timer?
     private var windowClosedAt: Date?
 
+    // MARK: - Focus Session State
+    /// Current phase of the focus session timer
+    var focusPhase: FocusPhase = .idle {
+        didSet { objectWillChange.send() }
+    }
+    /// When the current phase started
+    var focusPhaseStartedAt: Date? = nil {
+        didSet { objectWillChange.send() }
+    }
+    /// Duration of the relax period in seconds
+    var focusRelaxSeconds: Int = 0 {
+        didSet { objectWillChange.send() }
+    }
+    /// Duration of the work period in seconds
+    var focusWorkSeconds: Int = 0 {
+        didSet { objectWillChange.send() }
+    }
+    /// Menu bar status item for countdown display
+    private var menuBarItem: NSStatusItem?
+    private var menuBarTimer: Timer?
+    /// Whether the reminder popup should reopen (user closed it without choosing)
+    var reminderReopenPending: Bool = false {
+        didSet { objectWillChange.send() }
+    }
+
     var todos: [TodoItem] = [] {
         didSet { stateDidChange() }
     }
@@ -550,7 +575,7 @@ final class TodoManager: ObservableObject {
             selectedSidebarKey = "todo"
         }
 
-        if selectedBoard() == nil && selectedSidebarKey != "todo" && selectedSidebarKey != "trash" {
+        if selectedBoard() == nil && selectedSidebarKey != "todo" && selectedSidebarKey != "trash" && selectedSidebarKey != "reflections" {
             selectedSidebarKey = "todo"
         }
 
@@ -1139,6 +1164,18 @@ final class TodoManager: ObservableObject {
 
     private func handleWebsiteMatch(_ match: DistractionDetector.MatchResult, pid: pid_t) {
         if match.action == .autoClose {
+            // During work phase, close immediately without waiting for 2 strikes
+            if shouldForceCloseEntertainmentDuringWork() {
+                if blockerSettings.autoCloseEnabled,
+                   blockerSettings.accessibilityPermissionGranted,
+                   AXIsProcessTrusted() {
+                    DistractionDetector.closeDistractionTab(pid: pid)
+                    lastAutoClosedDistraction = match.label
+                    tabAutoClosedNonce += 1
+                }
+                consecutiveShortsStrikes = 0
+                return
+            }
             handleAutoCloseStrike(match: match.label, pid: pid) {
                 // Auto-close tab requires Accessibility trust.
                 guard blockerSettings.accessibilityPermissionGranted,
@@ -1151,6 +1188,17 @@ final class TodoManager: ObservableObject {
         }
 
         consecutiveShortsStrikes = 0
+        // During work phase, also close reminder-only sites immediately
+        if shouldForceCloseEntertainmentDuringWork() {
+            if blockerSettings.autoCloseEnabled,
+               blockerSettings.accessibilityPermissionGranted,
+               AXIsProcessTrusted() {
+                DistractionDetector.closeDistractionTab(pid: pid)
+                lastAutoClosedDistraction = match.label
+                tabAutoClosedNonce += 1
+            }
+            return
+        }
         triggerPromptIfNeeded()
     }
 
@@ -1170,15 +1218,30 @@ final class TodoManager: ObservableObject {
     }
 
     private func triggerPromptIfNeeded() {
+        // Don't show the reminder popup during an active focus session
+        // (relax or work phase) — the session is already managing the user's time.
+        guard focusPhase == .idle || focusPhase == .celebrating else { return }
+
         let now = Date()
         let interval = TimeInterval(blockerSettings.blockDurationSeconds)
         if let last = lastDistractionPromptAt, now.timeIntervalSince(last) < interval {
+            // If the user dismissed the prompt without choosing (still idle),
+            // re-show it immediately — don't let them escape via cooldown.
+            if focusPhase == .idle && reminderReopenPending {
+                lastDistractionPromptAt = now
+                blockerPromptNonce += 1
+                if debugModeEnabled {
+                    print("[Blocker] Re-showing prompt (dismissed without choice). Distraction: \(latestDetectedDistraction ?? "none")")
+                }
+                return
+            }
             if debugModeEnabled {
                 print("[Blocker] Prompt cooldown active. \(Int(interval - now.timeIntervalSince(last)))s remaining")
             }
             return
         }
         lastDistractionPromptAt = now
+        reminderReopenPending = true   // mark as pending until user makes a choice
         blockerPromptNonce += 1
         if debugModeEnabled {
             print("[Blocker] Triggering prompt. Distraction: \(latestDetectedDistraction ?? "none")")
@@ -1274,6 +1337,141 @@ final class TodoManager: ObservableObject {
         autoReopenTimer?.invalidate()
         autoReopenTimer = nil
         windowClosedAt = nil
+    }
+
+    // MARK: - Focus Session Management
+
+    /// Start a focus session: relax for relaxSeconds, then work for workSeconds.
+    func startFocusSession(relaxSeconds: Int, workSeconds: Int) {
+        focusRelaxSeconds = relaxSeconds
+        focusWorkSeconds = workSeconds
+        focusPhaseStartedAt = Date()
+        focusPhase = .relaxing
+        reminderReopenPending = false   // user made a choice — stop re-opening
+        lastDistractionPromptAt = Date() // suppress prompt during session
+        startMenuBarCountdown()
+    }
+
+    /// Called when the relax timer expires — transition to work phase.
+    func beginWorkPhase() {
+        focusPhaseStartedAt = Date()
+        focusPhase = .working
+        startMenuBarCountdown()
+    }
+
+    /// Called when the work timer expires — show celebration.
+    func beginCelebrationPhase() {
+        focusPhase = .celebrating
+        stopMenuBarCountdown()
+        // Show the prompt again for the celebration screen
+        blockerPromptNonce += 1
+    }
+
+    /// Save a reflection and return to idle.
+    func saveReflection(description: String, rating: Int) {
+        let entry = ReflectionEntry(
+            workDescription: description,
+            rating: max(1, min(5, rating)),
+            relaxMinutes: focusRelaxSeconds / 60,
+            workMinutes: focusWorkSeconds / 60
+        )
+        blockerSettings.reflections.insert(entry, at: 0)
+        endFocusSession()
+    }
+
+    /// End the session and return to idle.
+    func endFocusSession() {
+        focusPhase = .idle
+        focusPhaseStartedAt = nil
+        focusRelaxSeconds = 0
+        focusWorkSeconds = 0
+        reminderReopenPending = false
+        stopMenuBarCountdown()
+        lastDistractionPromptAt = nil
+    }
+
+    /// Seconds remaining in the current phase.
+    func focusSecondsRemaining(now: Date) -> Int {
+        guard let start = focusPhaseStartedAt else { return 0 }
+        let elapsed = Int(now.timeIntervalSince(start))
+        switch focusPhase {
+        case .relaxing:
+            return max(0, focusRelaxSeconds - elapsed)
+        case .working:
+            return max(0, focusWorkSeconds - elapsed)
+        default:
+            return 0
+        }
+    }
+
+    private func startMenuBarCountdown() {
+        stopMenuBarCountdown()
+        if menuBarItem == nil {
+            menuBarItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        }
+        updateMenuBarTitle()
+        menuBarTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            let remaining = self.focusSecondsRemaining(now: Date())
+            self.updateMenuBarTitle()
+            if remaining <= 0 {
+                DispatchQueue.main.async {
+                    switch self.focusPhase {
+                    case .relaxing:
+                        self.beginWorkPhase()
+                    case .working:
+                        self.beginCelebrationPhase()
+                    default:
+                        break
+                    }
+                }
+            }
+        }
+    }
+
+    private func updateMenuBarTitle() {
+        let remaining = focusSecondsRemaining(now: Date())
+        let mins = remaining / 60
+        let secs = remaining % 60
+        let timeStr = String(format: "%d:%02d", mins, secs)
+        switch focusPhase {
+        case .relaxing:
+            menuBarItem?.button?.title = "😌 Relax \(timeStr)"
+        case .working:
+            menuBarItem?.button?.title = "💪 Work \(timeStr)"
+        case .celebrating:
+            menuBarItem?.button?.title = "🎉 Done!"
+        case .idle:
+            menuBarItem?.button?.title = ""
+        }
+    }
+
+    private func stopMenuBarCountdown() {
+        menuBarTimer?.invalidate()
+        menuBarTimer = nil
+        if let item = menuBarItem {
+            NSStatusBar.system.removeStatusItem(item)
+            menuBarItem = nil
+        }
+    }
+
+    /// During work phase, any entertainment detection triggers immediate close (no prompt cooldown).
+    func shouldForceCloseEntertainmentDuringWork() -> Bool {
+        return focusPhase == .working
+    }
+
+    /// Add an app or website to the whitelist from the reminder popup.
+    func addToWhitelistFromReminder(name: String, isWebsite: Bool) {
+        reminderReopenPending = false   // user made a choice
+        if isWebsite {
+            addWhitelistedWebsite(name)
+        } else {
+            addWhitelistedApp(name)
+        }
+    }
+
+    func deleteReflection(at offsets: IndexSet) {
+        blockerSettings.reflections.remove(atOffsets: offsets)
     }
 
     func scheduleCheckpointWrite() {
@@ -1452,6 +1650,51 @@ enum DistractionDetector {
             print("[Blocker] Layer 3 checking AX window: \(rawTitle)")
         }
 
+        // ── Try to read the browser URL bar for accurate URL-based detection ──
+        // This catches YouTube Shorts whose window title is just the video name.
+        if let urlString = readBrowserURLFromAX(appElement: appElement, debugMode: debugMode) {
+            let lowerURL = urlString.lowercased()
+            if debugMode {
+                print("[Blocker] Layer 3 browser URL: \(urlString)")
+            }
+
+            // Whitelist check on URL
+            for site in whitelistedWebsites {
+                let needle = site.lowercased()
+                    .replacingOccurrences(of: "www.", with: "")
+                    .replacingOccurrences(of: "https://", with: "")
+                    .replacingOccurrences(of: "http://", with: "")
+                if lowerURL.contains(needle) { return nil }
+            }
+
+            // YouTube Shorts — URL contains /shorts/
+            if lowerURL.contains("youtube.com/shorts") || lowerURL.contains("youtu.be/shorts") {
+                return MatchResult(label: "YouTube Shorts", action: .autoClose)
+            }
+
+            // Check auto-close websites against URL
+            for site in autoCloseWebsites {
+                let needle = site.lowercased()
+                    .replacingOccurrences(of: "www.", with: "")
+                    .replacingOccurrences(of: "https://", with: "")
+                    .replacingOccurrences(of: "http://", with: "")
+                if lowerURL.contains(needle) {
+                    return MatchResult(label: site, action: .autoClose)
+                }
+            }
+
+            // Check reminder websites against URL
+            for site in reminderWebsites {
+                let needle = site.lowercased()
+                    .replacingOccurrences(of: "www.", with: "")
+                    .replacingOccurrences(of: "https://", with: "")
+                    .replacingOccurrences(of: "http://", with: "")
+                if lowerURL.contains(needle) {
+                    return MatchResult(label: site, action: .reminder)
+                }
+            }
+        }
+
         let title = rawTitle.lowercased()
         return matchTitle(
             title,
@@ -1461,6 +1704,57 @@ enum DistractionDetector {
             blockYouTubeVideos: blockYouTubeVideos,
             whitelistedWebsites: whitelistedWebsites
         )
+    }
+
+    /// Attempts to read the current URL from a browser's address bar via AX API.
+    /// Works with Safari, Chrome, Firefox, Arc, and most Chromium-based browsers.
+    static func readBrowserURLFromAX(appElement: AXUIElement, debugMode: Bool = false) -> String? {
+        // Strategy 1: Look for a toolbar/address bar with AXURLField or AXTextField role
+        // that contains a URL value. Different browsers expose this differently.
+
+        // Try to get all windows
+        var windowsRef: AnyObject?
+        guard AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsRef) == .success,
+              let windows = windowsRef as? [AXUIElement],
+              let frontWindow = windows.first else { return nil }
+
+        return findURLInElement(frontWindow, depth: 0, maxDepth: 8, debugMode: debugMode)
+    }
+
+    private static func findURLInElement(_ element: AXUIElement, depth: Int, maxDepth: Int, debugMode: Bool) -> String? {
+        guard depth <= maxDepth else { return nil }
+
+        // Check role
+        var roleRef: AnyObject?
+        AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &roleRef)
+        let role = roleRef as? String ?? ""
+
+        // Check if this element is a text field or URL field
+        if role == "AXTextField" || role == "AXComboBox" || role == "AXURLField" {
+            var valueRef: AnyObject?
+            if AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &valueRef) == .success,
+               let value = valueRef as? String {
+                let lower = value.lowercased()
+                // Validate it looks like a URL
+                if lower.hasPrefix("http://") || lower.hasPrefix("https://") ||
+                   lower.hasPrefix("www.") || lower.contains(".com") || lower.contains(".io") ||
+                   lower.contains(".net") || lower.contains(".org") {
+                    return value
+                }
+            }
+        }
+
+        // Recurse into children
+        var childrenRef: AnyObject?
+        guard AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &childrenRef) == .success,
+              let children = childrenRef as? [AXUIElement] else { return nil }
+
+        for child in children {
+            if let found = findURLInElement(child, depth: depth + 1, maxDepth: maxDepth, debugMode: debugMode) {
+                return found
+            }
+        }
+        return nil
     }
 
     // ── Shared matching logic ─────────────────────────────────────────────────
@@ -1482,6 +1776,16 @@ enum DistractionDetector {
             if title.contains(baseName) || title.contains(needle) {
                 return nil
             }
+        }
+
+        // YouTube Shorts — detect via title containing "shorts" alongside "youtube"
+        // or just "youtube shorts" as a phrase. Some browsers show "YouTube Shorts" in title.
+        if title.contains("youtube") && title.contains("shorts") {
+            return MatchResult(label: "YouTube Shorts", action: .autoClose)
+        }
+        // Also catch "#shorts" tag in video titles
+        if title.contains("youtube") && title.contains("#shorts") {
+            return MatchResult(label: "YouTube Shorts", action: .autoClose)
         }
 
         // YouTube videos/home/feed (configurable reminder only)
@@ -1561,11 +1865,34 @@ enum DistractionDetector {
         guard AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &focusedWindow) == .success,
               let windowElement = focusedWindow else { return }
 
-        // Verify the window title is still a shorts-type distraction before closing
-        var titleValue: AnyObject?
-        if AXUIElementCopyAttributeValue(windowElement as! AXUIElement, kAXTitleAttribute as CFString, &titleValue) == .success,
-           let title = titleValue as? String {
-            guard isShortsTypeDistraction(title.lowercased()) else { return }
+        // Try URL-based verification first (most accurate for YouTube Shorts)
+        if let urlString = readBrowserURLFromAX(appElement: appElement) {
+            let lowerURL = urlString.lowercased()
+            // Only close if the URL is still a distraction (not a work page)
+            let isStillDistraction = lowerURL.contains("youtube.com/shorts") ||
+                lowerURL.contains("tiktok.com") ||
+                lowerURL.contains("instagram.com") ||
+                lowerURL.contains("twitter.com") ||
+                lowerURL.contains("x.com") ||
+                lowerURL.contains("reddit.com") ||
+                lowerURL.contains("facebook.com") ||
+                lowerURL.contains("snapchat.com") ||
+                lowerURL.contains("threads.net") ||
+                lowerURL.contains("twitch.tv") ||
+                lowerURL.contains("netflix.com") ||
+                lowerURL.contains("primevideo.com") ||
+                lowerURL.contains("disneyplus.com") ||
+                lowerURL.contains("hulu.com") ||
+                lowerURL.contains("9gag.com") ||
+                lowerURL.contains("tumblr.com")
+            guard isStillDistraction else { return }
+        } else {
+            // Fall back to title-based verification
+            var titleValue: AnyObject?
+            if AXUIElementCopyAttributeValue(windowElement as! AXUIElement, kAXTitleAttribute as CFString, &titleValue) == .success,
+               let title = titleValue as? String {
+                guard isShortsTypeDistraction(title.lowercased()) else { return }
+            }
         }
 
         // Post Cmd+W key event to the process to close the tab
@@ -1980,17 +2307,17 @@ class TodoWindow: NSWindow {
     }
 }
 
-final class BlockerPromptWindowController {
+// MARK: - Blocker Prompt Window Controller (Full-Screen Intelligent Timer)
+
+final class BlockerPromptWindowController: NSObject, NSWindowDelegate {
     private var window: NSWindow?
     private weak var manager: TodoManager?
 
     func show(manager: TodoManager) {
         self.manager = manager
-        let screenRect = NSScreen.main?.visibleFrame ?? NSRect(x: 80, y: 80, width: 1200, height: 800)
-        let width = screenRect.width * 0.75
-        let height = screenRect.height * 0.75
-        let originX = screenRect.midX - width / 2
-        let originY = screenRect.midY - height / 2
+
+        // Use the full screen frame (not visibleFrame) so we cover the menu bar area too
+        let screenFrame = NSScreen.main?.frame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
 
         if window == nil {
             let root = BlockerPromptView(manager: manager) { [weak self] in
@@ -1999,28 +2326,37 @@ final class BlockerPromptWindowController {
             let host = NSHostingView(rootView: root)
 
             let promptWindow = NSWindow(
-                contentRect: NSRect(x: originX, y: originY, width: width, height: height),
-                styleMask: [.titled, .closable, .resizable],
+                contentRect: screenFrame,
+                styleMask: [.borderless],
                 backing: .buffered,
                 defer: false
             )
-            promptWindow.title = "Focus Reminder"
-            // Use .statusBar+1 so it floats above all other windows including
-            // the main app window which is at .floating level.
-            promptWindow.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.statusWindow)) + 1)
+            // Float above everything — higher than .statusBar so it covers the menu bar
+            promptWindow.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.maximumWindow)) - 1)
             promptWindow.contentView = host
             promptWindow.isReleasedWhenClosed = false
-            promptWindow.minSize = NSSize(width: 480, height: 360)
+            promptWindow.isOpaque = true
+            promptWindow.hasShadow = false
+            promptWindow.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+            promptWindow.delegate = self
             window = promptWindow
         }
 
-        window?.setFrame(NSRect(x: originX, y: originY, width: width, height: height), display: true)
+        window?.setFrame(screenFrame, display: true)
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
 
     func hide() {
         window?.orderOut(nil)
+    }
+
+    // Prevent the user from closing the window via keyboard shortcuts
+    // when they haven't made a choice yet (idle phase).
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        guard let mgr = manager else { return true }
+        // Allow close only if a session is already running or we're celebrating
+        return mgr.focusPhase != .idle
     }
 }
 
@@ -2068,232 +2404,479 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     }
 }
 
+// MARK: - Blocker Prompt View (Intelligent Focus Timer)
+
 struct BlockerPromptView: View {
     @ObservedObject var manager: TodoManager
     let onDismiss: () -> Void
+
     @State private var now = Date()
-    @State private var phraseIndex = 0
-    @State private var visiblePhrase: String = ""
-    @State private var showTabClosedBanner: Bool = false
-    @State private var tabClosedBannerText: String = ""
+    @State private var showTabClosedBanner = false
+    @State private var tabClosedBannerText = ""
 
-    // Notebook brown palette
-    private let notebookBrown = Color(red: 0.84, green: 0.75, blue: 0.62)
-    private let cardBrown = Color(red: 0.96, green: 0.91, blue: 0.80)
-    private let darkBrown = Color(red: 0.38, green: 0.26, blue: 0.14)
-
-    private var topThreeTodos: [TodoItem] {
-        manager.sortedTodos.filter { !$0.isCompleted }.prefix(3).map { $0 }
-    }
-
-    private var allPendingTodos: [TodoItem] {
-        manager.sortedTodos.filter { !$0.isCompleted }
-    }
-
-    private var currentPhrase: String {
-        let phrases = manager.blockerSettings.motivationalPhrases
-        guard !phrases.isEmpty else { return "Focus on the next important step." }
-        return phrases[phraseIndex % phrases.count]
-    }
+    // Deep navy background palette
+    private let bgColor       = Color(red: 0.06, green: 0.07, blue: 0.12)
+    private let cardColor     = Color(red: 0.10, green: 0.12, blue: 0.20)
+    private let accentBlue    = Color(red: 0.25, green: 0.55, blue: 1.00)
+    private let accentGreen   = Color(red: 0.20, green: 0.80, blue: 0.45)
+    private let accentOrange  = Color(red: 1.00, green: 0.60, blue: 0.15)
+    private let textPrimary   = Color.white
+    private let textSecondary = Color.white.opacity(0.65)
 
     var body: some View {
         ZStack {
-            notebookBrown.ignoresSafeArea()
+            bgColor.ignoresSafeArea()
 
-            VStack(spacing: 0) {
-                // Header
-                HStack(alignment: .center) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Stay Focused")
-                            .font(.system(size: 28, weight: .bold, design: .serif))
-                            .foregroundColor(darkBrown)
-                        if let distraction = manager.latestDetectedDistraction {
-                            Text("Distraction detected: \(distraction)")
-                                .font(.caption)
-                                .foregroundColor(darkBrown.opacity(0.7))
-                        }
-                    }
-                    Spacer()
-                    Button("Resume Work") {
-                        onDismiss()
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(darkBrown)
-                }
-                .padding(.horizontal, 28)
-                .padding(.top, 24)
-                .padding(.bottom, 16)
-
-                // Motivational phrase with smooth fade
-                ZStack {
-                    Text(visiblePhrase)
-                        .font(.system(size: 17, weight: .semibold, design: .serif))
-                        .multilineTextAlignment(.center)
-                        .foregroundColor(darkBrown)
-                        .frame(maxWidth: .infinity)
-                        .padding(.horizontal, 28)
-                        .padding(.vertical, 14)
-                        .id(phraseIndex)
-                        .transition(.opacity)
-                }
-                .animation(.easeInOut(duration: 0.7), value: phraseIndex)
-
-                Divider()
-                    .background(darkBrown.opacity(0.3))
-                    .padding(.horizontal, 28)
-
-                // Top 3 priorities — centred, prominent
-                VStack(spacing: 10) {
-                    Text("Top 3 Priorities")
-                        .font(.system(size: 13, weight: .semibold, design: .serif))
-                        .foregroundColor(darkBrown.opacity(0.7))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 28)
-                        .padding(.top, 14)
-
-                    if topThreeTodos.isEmpty {
-                        Text("No pending tasks — great work!")
-                            .font(.headline)
-                            .foregroundColor(darkBrown.opacity(0.6))
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 20)
-                    } else {
-                        ForEach(topThreeTodos) { todo in
-                            HStack(spacing: 12) {
-                                RoundedRectangle(cornerRadius: 4)
-                                    .fill(urgencyColor(for: todo))
-                                    .frame(width: 5)
-                                    .frame(height: 44)
-
-                                VStack(alignment: .leading, spacing: 3) {
-                                    Text(todo.title)
-                                        .font(.system(size: 15, weight: .semibold))
-                                        .foregroundColor(darkBrown)
-                                        .lineLimit(1)
-                                    Text(timeRemaining(for: todo, now: now))
-                                        .font(.system(size: 12, design: .monospaced))
-                                        .foregroundColor(urgencyColor(for: todo))
-                                }
-                                Spacer()
-
-                                Circle()
-                                    .fill(urgencyColor(for: todo))
-                                    .frame(width: 10, height: 10)
-                            }
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 10)
-                            .background(
-                                RoundedRectangle(cornerRadius: 12)
-                                    .fill(cardBrown)
-                                    .shadow(color: darkBrown.opacity(0.12), radius: 4, x: 0, y: 2)
-                            )
-                            .padding(.horizontal, 28)
-                        }
-                    }
-                }
-
-                Divider()
-                    .background(darkBrown.opacity(0.3))
-                    .padding(.horizontal, 28)
-                    .padding(.top, 14)
-
-                // All pending tasks list
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("All Pending Tasks (\(allPendingTodos.count))")
-                        .font(.system(size: 13, weight: .semibold, design: .serif))
-                        .foregroundColor(darkBrown.opacity(0.7))
-                        .padding(.horizontal, 28)
-                        .padding(.top, 10)
-
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 4) {
-                            ForEach(allPendingTodos) { todo in
-                                HStack(spacing: 10) {
-                                    Circle()
-                                        .fill(urgencyColor(for: todo))
-                                        .frame(width: 7, height: 7)
-                                    Text(todo.title)
-                                        .font(.system(size: 13))
-                                        .foregroundColor(darkBrown)
-                                        .lineLimit(1)
-                                    Spacer()
-                                    Text(timeRemaining(for: todo, now: now))
-                                        .font(.system(size: 11, design: .monospaced))
-                                        .foregroundColor(urgencyColor(for: todo))
-                                }
-                                .padding(.horizontal, 28)
-                                .padding(.vertical, 3)
-                            }
-                        }
-                        .padding(.bottom, 16)
-                    }
-                }
-                .frame(maxHeight: .infinity)
+            switch manager.focusPhase {
+            case .idle:
+                sessionPickerView
+            case .relaxing:
+                activeTimerView(phase: .relaxing)
+            case .working:
+                activeTimerView(phase: .working)
+            case .celebrating:
+                CelebrationReflectionView(manager: manager, onDismiss: onDismiss)
             }
         }
         .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { value in
             now = value
         }
-        .onReceive(Timer.publish(every: 7, on: .main, in: .common).autoconnect()) { _ in
-            withAnimation(.easeInOut(duration: 0.7)) {
-                phraseIndex += 1
-                visiblePhrase = currentPhrase
-            }
-        }
-        .onAppear {
-            visiblePhrase = currentPhrase
-        }
         .onChange(of: manager.tabAutoClosedNonce) { _ in
-            tabClosedBannerText = "Tab closed: \(manager.lastAutoClosedDistraction)"
-            withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
-                showTabClosedBanner = true
-            }
+            tabClosedBannerText = "Closed: \(manager.lastAutoClosedDistraction)"
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) { showTabClosedBanner = true }
             DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) {
-                withAnimation(.easeOut(duration: 0.4)) {
-                    showTabClosedBanner = false
-                }
+                withAnimation(.easeOut(duration: 0.4)) { showTabClosedBanner = false }
             }
         }
         .overlay(alignment: .top) {
             if showTabClosedBanner {
                 HStack(spacing: 10) {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundColor(.white)
+                    Image(systemName: "xmark.circle.fill").foregroundColor(.white)
                     Text(tabClosedBannerText)
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(.system(size: 15, weight: .semibold))
                         .foregroundColor(.white)
                 }
-                .padding(.horizontal, 18)
-                .padding(.vertical, 10)
-                .background(
-                    Capsule()
-                        .fill(Color(red: 0.18, green: 0.12, blue: 0.06).opacity(0.92))
-                        .shadow(color: .black.opacity(0.25), radius: 8, x: 0, y: 4)
-                )
-                .padding(.top, 14)
+                .padding(.horizontal, 22)
+                .padding(.vertical, 12)
+                .background(Capsule().fill(Color.red.opacity(0.85)))
+                .padding(.top, 20)
                 .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
     }
 
-    private func urgencyColor(for todo: TodoItem) -> Color {
-        let delta = todo.dueDate.timeIntervalSince(now)
-        if delta < 0 { return .red }
-        if delta < 3600 { return .orange }
-        if delta < 86400 * 3 { return Color(red: 0.85, green: 0.55, blue: 0.1) }
-        return Color(red: 0.25, green: 0.55, blue: 0.25)
+    // ── Session Picker ────────────────────────────────────────────────────────
+
+    private var sessionPickerView: some View {
+        VStack(spacing: 0) {
+            Spacer()
+
+            VStack(spacing: 12) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 64))
+                    .foregroundColor(accentOrange)
+
+                Text("Distraction Detected")
+                    .font(.system(size: 60, weight: .bold, design: .rounded))
+                    .foregroundColor(textPrimary)
+
+                if let distraction = manager.latestDetectedDistraction {
+                    Text("You opened: \(distraction)")
+                        .font(.system(size: 28, weight: .medium))
+                        .foregroundColor(textSecondary)
+                }
+
+                Text("Choose a focus plan to continue")
+                    .font(.system(size: 24, weight: .regular))
+                    .foregroundColor(textSecondary)
+                    .padding(.top, 4)
+            }
+
+            Spacer().frame(height: 60)
+
+            VStack(spacing: 20) {
+                sessionOptionCard(relaxMins: 10, workMins: 30, icon: "🌿", label: "Quick Break",      color: accentGreen)
+                sessionOptionCard(relaxMins: 20, workMins: 40, icon: "⚡️", label: "Standard Session", color: accentBlue)
+                sessionOptionCard(relaxMins: 30, workMins: 60, icon: "🔥", label: "Deep Work",        color: accentOrange)
+            }
+            .frame(maxWidth: 700)
+
+            Spacer().frame(height: 40)
+
+            if let distraction = manager.latestDetectedDistraction {
+                Button {
+                    let isWebsite = distraction.contains(".") ||
+                        ["youtube","tiktok","reddit","instagram","twitter","netflix","twitch"]
+                            .contains(where: { distraction.lowercased().contains($0) })
+                    manager.addToWhitelistFromReminder(name: distraction, isWebsite: isWebsite)
+                    onDismiss()
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: "checkmark.shield.fill").font(.system(size: 20))
+                        Text("This isn't entertainment — add \"\(distraction)\" to whitelist")
+                            .font(.system(size: 20, weight: .medium))
+                    }
+                    .foregroundColor(textSecondary)
+                    .padding(.horizontal, 28)
+                    .padding(.vertical, 14)
+                    .background(
+                        RoundedRectangle(cornerRadius: 14)
+                            .fill(cardColor)
+                            .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.white.opacity(0.12), lineWidth: 1))
+                    )
+                }
+                .buttonStyle(.plain)
+            }
+
+            Spacer()
+
+            Text("You must choose a plan to dismiss this screen.")
+                .font(.system(size: 16))
+                .foregroundColor(textSecondary.opacity(0.6))
+                .padding(.bottom, 30)
+        }
+        .padding(.horizontal, 60)
     }
 
-    private func timeRemaining(for todo: TodoItem, now: Date) -> String {
-        let delta = Int(todo.dueDate.timeIntervalSince(now))
-        if delta <= 0 { return "Overdue" }
-        let days = delta / 86400
-        let hours = (delta % 86400) / 3600
-        let mins = (delta % 3600) / 60
-        let secs = delta % 60
-        if days > 0 { return "\(days)d \(hours)h \(mins)m" }
-        if hours > 0 { return "\(hours)h \(mins)m \(secs)s" }
-        return "\(mins)m \(secs)s"
+    private func sessionOptionCard(relaxMins: Int, workMins: Int, icon: String, label: String, color: Color) -> some View {
+        Button {
+            manager.startFocusSession(relaxSeconds: relaxMins * 60, workSeconds: workMins * 60)
+            onDismiss()
+        } label: {
+            HStack(spacing: 24) {
+                Text(icon).font(.system(size: 48))
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(label)
+                        .font(.system(size: 28, weight: .bold, design: .rounded))
+                        .foregroundColor(textPrimary)
+                    HStack(spacing: 16) {
+                        Label("Relax \(relaxMins) min", systemImage: "moon.fill")
+                            .font(.system(size: 20, weight: .medium))
+                            .foregroundColor(color)
+                        Text("→").font(.system(size: 20)).foregroundColor(textSecondary)
+                        Label("Work \(workMins) min", systemImage: "bolt.fill")
+                            .font(.system(size: 20, weight: .medium))
+                            .foregroundColor(textPrimary)
+                    }
+                }
+
+                Spacer()
+
+                Image(systemName: "arrow.right.circle.fill")
+                    .font(.system(size: 36))
+                    .foregroundColor(color)
+            }
+            .padding(.horizontal, 32)
+            .padding(.vertical, 24)
+            .background(
+                RoundedRectangle(cornerRadius: 20)
+                    .fill(cardColor)
+                    .overlay(RoundedRectangle(cornerRadius: 20).stroke(color.opacity(0.45), lineWidth: 2))
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    // ── Active Timer View ─────────────────────────────────────────────────────
+
+    private func activeTimerView(phase: FocusPhase) -> some View {
+        let isRelax = phase == .relaxing
+        let phaseColor  = isRelax ? accentGreen : accentOrange
+        let phaseIcon   = isRelax ? "moon.fill"  : "bolt.fill"
+        let phaseLabel  = isRelax ? "RELAX TIME"  : "WORK TIME"
+        let phaseSubtitle = isRelax
+            ? "Enjoy your break — entertainment is allowed"
+            : "Stay focused — entertainment is being blocked"
+
+        let remaining     = manager.focusSecondsRemaining(now: now)
+        let totalSeconds  = isRelax ? manager.focusRelaxSeconds : manager.focusWorkSeconds
+        let progress      = totalSeconds > 0 ? Double(totalSeconds - remaining) / Double(totalSeconds) : 0.0
+        let mins = remaining / 60
+        let secs = remaining % 60
+        let timeString = String(format: "%d:%02d", mins, secs)
+
+        return VStack(spacing: 0) {
+            Spacer()
+
+            HStack(spacing: 14) {
+                Image(systemName: phaseIcon).font(.system(size: 40)).foregroundColor(phaseColor)
+                Text(phaseLabel)
+                    .font(.system(size: 48, weight: .black, design: .rounded))
+                    .foregroundColor(phaseColor)
+            }
+
+            Spacer().frame(height: 20)
+
+            Text(timeString)
+                .font(.system(size: 120, weight: .bold, design: .monospaced))
+                .foregroundColor(textPrimary)
+                .monospacedDigit()
+
+            Spacer().frame(height: 24)
+
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 8).fill(Color.white.opacity(0.12)).frame(height: 16)
+                    RoundedRectangle(cornerRadius: 8).fill(phaseColor)
+                        .frame(width: geo.size.width * CGFloat(progress), height: 16)
+                        .animation(.linear(duration: 1), value: progress)
+                }
+            }
+            .frame(height: 16)
+            .frame(maxWidth: 700)
+
+            Spacer().frame(height: 28)
+
+            Text(phaseSubtitle)
+                .font(.system(size: 26, weight: .medium))
+                .foregroundColor(textSecondary)
+
+            if !isRelax {
+                Spacer().frame(height: 16)
+                Text("Any entertainment tab will be closed instantly.")
+                    .font(.system(size: 20))
+                    .foregroundColor(accentOrange.opacity(0.85))
+            }
+
+            Spacer()
+
+            if isRelax {
+                HStack(spacing: 10) {
+                    Image(systemName: "bolt.fill").foregroundColor(accentOrange)
+                    Text("After relax: \(manager.focusWorkSeconds / 60) min work session begins automatically")
+                        .font(.system(size: 18))
+                        .foregroundColor(textSecondary)
+                }
+                .padding(.bottom, 40)
+            }
+        }
+        .padding(.horizontal, 80)
+    }
+}
+
+// MARK: - Celebration & Reflection View
+
+struct CelebrationReflectionView: View {
+    @ObservedObject var manager: TodoManager
+    let onDismiss: () -> Void
+
+    @State private var workDescription = ""
+    @State private var rating = 3
+
+    private let bgColor       = Color(red: 0.06, green: 0.07, blue: 0.12)
+    private let cardColor     = Color(red: 0.10, green: 0.12, blue: 0.20)
+    private let accentGreen   = Color(red: 0.20, green: 0.80, blue: 0.45)
+    private let textPrimary   = Color.white
+    private let textSecondary = Color.white.opacity(0.65)
+
+    var body: some View {
+        ZStack {
+            bgColor.ignoresSafeArea()
+
+            VStack(spacing: 0) {
+                Spacer()
+
+                VStack(spacing: 16) {
+                    Text("🎉").font(.system(size: 80))
+                    Text("Work Session Complete!")
+                        .font(.system(size: 60, weight: .bold, design: .rounded))
+                        .foregroundColor(textPrimary)
+                    Text("You completed \(manager.focusWorkSeconds / 60) minutes of focused work.")
+                        .font(.system(size: 26, weight: .medium))
+                        .foregroundColor(textSecondary)
+                }
+
+                Spacer().frame(height: 50)
+
+                VStack(alignment: .leading, spacing: 20) {
+                    Text("Document Your Progress")
+                        .font(.system(size: 28, weight: .bold))
+                        .foregroundColor(textPrimary)
+
+                    Text("What did you accomplish during this work session?")
+                        .font(.system(size: 20))
+                        .foregroundColor(textSecondary)
+
+                    ZStack(alignment: .topLeading) {
+                        RoundedRectangle(cornerRadius: 14)
+                            .fill(Color.white.opacity(0.07))
+                            .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.white.opacity(0.15), lineWidth: 1))
+                        if workDescription.isEmpty {
+                            Text("Describe what you worked on...")
+                                .font(.system(size: 18))
+                                .foregroundColor(Color.white.opacity(0.3))
+                                .padding(16)
+                        }
+                        TextEditor(text: $workDescription)
+                            .font(.system(size: 18))
+                            .foregroundColor(textPrimary)
+                            .scrollContentBackground(.hidden)
+                            .background(Color.clear)
+                            .padding(10)
+                    }
+                    .frame(height: 140)
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Rate this session")
+                            .font(.system(size: 20, weight: .semibold))
+                            .foregroundColor(textPrimary)
+                        HStack(spacing: 16) {
+                            ForEach(1...5, id: \.self) { star in
+                                Button {
+                                    rating = star
+                                } label: {
+                                    Image(systemName: star <= rating ? "star.fill" : "star")
+                                        .font(.system(size: 40))
+                                        .foregroundColor(star <= rating ? .yellow : Color.white.opacity(0.3))
+                                }
+                                .buttonStyle(.plain)
+                            }
+                            Spacer()
+                            Text(ratingLabel)
+                                .font(.system(size: 20, weight: .medium))
+                                .foregroundColor(textSecondary)
+                        }
+                    }
+
+                    HStack {
+                        Spacer()
+                        Button {
+                            manager.saveReflection(description: workDescription, rating: rating)
+                            onDismiss()
+                        } label: {
+                            HStack(spacing: 12) {
+                                Image(systemName: "checkmark.circle.fill").font(.system(size: 22))
+                                Text("Submit & Close").font(.system(size: 22, weight: .bold))
+                            }
+                            .foregroundColor(.black)
+                            .padding(.horizontal, 36)
+                            .padding(.vertical, 16)
+                            .background(RoundedRectangle(cornerRadius: 16).fill(accentGreen))
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(workDescription.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .opacity(workDescription.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0.4 : 1)
+
+                        Button {
+                            manager.endFocusSession()
+                            onDismiss()
+                        } label: {
+                            Text("Skip")
+                                .font(.system(size: 18))
+                                .foregroundColor(textSecondary)
+                                .padding(.horizontal, 20)
+                                .padding(.vertical, 16)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(40)
+                .background(
+                    RoundedRectangle(cornerRadius: 24)
+                        .fill(cardColor)
+                        .overlay(RoundedRectangle(cornerRadius: 24).stroke(accentGreen.opacity(0.3), lineWidth: 1.5))
+                )
+                .frame(maxWidth: 760)
+
+                Spacer()
+            }
+            .padding(.horizontal, 80)
+        }
+    }
+
+    private var ratingLabel: String {
+        switch rating {
+        case 1: return "Rough"
+        case 2: return "Okay"
+        case 3: return "Good"
+        case 4: return "Great"
+        case 5: return "Amazing!"
+        default: return ""
+        }
+    }
+}
+
+// MARK: - Reflections View
+
+struct ReflectionsView: View {
+    @EnvironmentObject var manager: TodoManager
+
+    private let accentGreen = Color(red: 0.20, green: 0.80, blue: 0.45)
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("Reflections")
+                    .font(.title2.bold())
+                Spacer()
+                Text("\(manager.blockerSettings.reflections.count) entries")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+
+            Divider()
+
+            if manager.blockerSettings.reflections.isEmpty {
+                VStack(spacing: 16) {
+                    Image(systemName: "book.closed")
+                        .font(.system(size: 48))
+                        .foregroundStyle(.secondary)
+                    Text("No reflections yet.")
+                        .font(.headline)
+                        .foregroundStyle(.secondary)
+                    Text("Complete a focus session to log your first reflection.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding()
+            } else {
+                List {
+                    ForEach(manager.blockerSettings.reflections) { entry in
+                        reflectionRow(entry)
+                    }
+                    .onDelete { offsets in
+                        manager.deleteReflection(at: offsets)
+                    }
+                }
+                .listStyle(.inset)
+            }
+        }
+    }
+
+    private func reflectionRow(_ entry: ReflectionEntry) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(entry.date.formatted(date: .abbreviated, time: .shortened))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                HStack(spacing: 2) {
+                    ForEach(1...5, id: \.self) { star in
+                        Image(systemName: star <= entry.rating ? "star.fill" : "star")
+                            .font(.caption)
+                            .foregroundColor(star <= entry.rating ? .yellow : .secondary)
+                    }
+                }
+            }
+            HStack(spacing: 12) {
+                Label("\(entry.relaxMinutes)m relax", systemImage: "moon.fill")
+                    .font(.caption).foregroundColor(accentGreen)
+                Label("\(entry.workMinutes)m work", systemImage: "bolt.fill")
+                    .font(.caption).foregroundStyle(.primary)
+            }
+            if !entry.workDescription.isEmpty {
+                Text(entry.workDescription)
+                    .font(.subheadline)
+                    .foregroundStyle(.primary)
+                    .lineLimit(3)
+            }
+        }
+        .padding(.vertical, 4)
     }
 }
 
@@ -2412,6 +2995,18 @@ struct ContentView: View {
                             }
                             .disabled(manager.trashedNoteBoards.isEmpty)
                         }
+
+                        Divider()
+
+                        sidebarSelectionRow(
+                            title: "Reflections (\(manager.blockerSettings.reflections.count))",
+                            isSelected: manager.selectedSidebarKey == "reflections",
+                            isDimmed: manager.blockerSettings.reflections.isEmpty
+                        ) {
+                            manager.selectedSidebarKey = "reflections"
+                        } menu: {
+                            EmptyView()
+                        }
                     }
                 }
                 .navigationTitle("Sidebar")
@@ -2452,6 +3047,10 @@ struct ContentView: View {
             VStack(spacing: 0) {
                 if manager.selectedSidebarKey == "trash" {
                     TrashBoardsView()
+                        .environmentObject(manager)
+                        .frame(maxHeight: .infinity)
+                } else if manager.selectedSidebarKey == "reflections" {
+                    ReflectionsView()
                         .environmentObject(manager)
                         .frame(maxHeight: .infinity)
                 } else {
@@ -2742,9 +3341,23 @@ struct ContentView: View {
         }
         .onReceive(blockerPollingTimer) { _ in
             manager.evaluateDistraction()
+            // If a session is running and the celebration phase triggered, show the prompt
+            if manager.focusPhase == .celebrating {
+                blockerPromptController.show(manager: manager)
+            }
         }
         .onChange(of: manager.blockerPromptNonce) { _ in
             blockerPromptController.show(manager: manager)
+        }
+        .onChange(of: manager.focusPhase) { phase in
+            // When work phase ends and celebration begins, show the prompt
+            if phase == .celebrating {
+                blockerPromptController.show(manager: manager)
+            }
+            // When session ends (idle), hide the prompt
+            if phase == .idle {
+                blockerPromptController.hide()
+            }
         }
         .safeAreaInset(edge: .bottom) {
             if manager.debugModeEnabled {
