@@ -2932,23 +2932,67 @@ struct CelebrationReflectionView: View {
 struct ReflectionsView: View {
     @EnvironmentObject var manager: TodoManager
 
-    private let accentGreen = Color(red: 0.20, green: 0.80, blue: 0.45)
+    @State private var showSessionPicker = false
+    @State private var relaxMinutes: Int = 10
+    @State private var workMinutes: Int = 30
+
+    private let accentGreen  = Color(red: 0.20, green: 0.80, blue: 0.45)
+    private let accentBlue   = Color(red: 0.25, green: 0.55, blue: 1.00)
+    private let accentOrange = Color(red: 1.00, green: 0.60, blue: 0.15)
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Text("Reflections")
-                    .font(.title2.bold())
+
+            // ── Header ────────────────────────────────────────────────────────
+            HStack(alignment: .center) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Reflections")
+                        .font(.title2.bold())
+                    Text("\(manager.blockerSettings.reflections.count) session\(manager.blockerSettings.reflections.count == 1 ? "" : "s") logged")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 Spacer()
-                Text("\(manager.blockerSettings.reflections.count) entries")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+
+                if manager.focusPhase == .relaxing || manager.focusPhase == .working {
+                    // Show live badge when a session is already running
+                    activeSessionBadge
+                } else {
+                    Button {
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
+                            showSessionPicker.toggle()
+                        }
+                    } label: {
+                        Label(
+                            showSessionPicker ? "Cancel" : "Start Session",
+                            systemImage: showSessionPicker ? "xmark.circle" : "play.circle.fill"
+                        )
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(showSessionPicker ? .secondary : .white)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 7)
+                        .background(
+                            RoundedRectangle(cornerRadius: 10)
+                                .fill(showSessionPicker
+                                      ? Color.secondary.opacity(0.15)
+                                      : accentGreen)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                }
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
 
+            // ── Session Picker Panel ──────────────────────────────────────────
+            if showSessionPicker {
+                sessionPickerPanel
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+
             Divider()
 
+            // ── Reflections List ──────────────────────────────────────────────
             if manager.blockerSettings.reflections.isEmpty {
                 VStack(spacing: 16) {
                     Image(systemName: "book.closed")
@@ -2961,6 +3005,21 @@ struct ReflectionsView: View {
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
+                    if !showSessionPicker && manager.focusPhase == .idle {
+                        Button {
+                            withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
+                                showSessionPicker = true
+                            }
+                        } label: {
+                            Label("Start your first session", systemImage: "play.circle.fill")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 18)
+                                .padding(.vertical, 10)
+                                .background(RoundedRectangle(cornerRadius: 10).fill(accentGreen))
+                        }
+                        .buttonStyle(.plain)
+                    }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .padding()
@@ -2976,7 +3035,169 @@ struct ReflectionsView: View {
                 .listStyle(.inset)
             }
         }
+        .animation(.spring(response: 0.35, dampingFraction: 0.75), value: showSessionPicker)
     }
+
+    // ── Session Picker Panel ──────────────────────────────────────────────────
+
+    private var sessionPickerPanel: some View {
+        VStack(alignment: .leading, spacing: 14) {
+
+            Text("Plan your session")
+                .font(.headline)
+                .padding(.horizontal, 16)
+                .padding(.top, 14)
+
+            // Quick presets
+            HStack(spacing: 8) {
+                presetButton(label: "Quick",    icon: "🌿", relax: 10, work: 30, color: accentGreen)
+                presetButton(label: "Standard", icon: "⚡️", relax: 20, work: 40, color: accentBlue)
+                presetButton(label: "Deep",     icon: "🔥", relax: 30, work: 60, color: accentOrange)
+            }
+            .padding(.horizontal, 16)
+
+            Divider().padding(.horizontal, 16)
+
+            // Custom sliders
+            VStack(spacing: 10) {
+                HStack(spacing: 10) {
+                    Image(systemName: "moon.fill")
+                        .foregroundColor(accentGreen)
+                        .frame(width: 18)
+                    Text("Relax")
+                        .font(.subheadline.weight(.medium))
+                        .frame(width: 40, alignment: .leading)
+                    Slider(value: Binding(
+                        get: { Double(relaxMinutes) },
+                        set: { relaxMinutes = Int($0) }
+                    ), in: 5...60, step: 5)
+                    .tint(accentGreen)
+                    Text("\(relaxMinutes) min")
+                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                        .frame(width: 50, alignment: .trailing)
+                }
+
+                HStack(spacing: 10) {
+                    Image(systemName: "bolt.fill")
+                        .foregroundColor(accentOrange)
+                        .frame(width: 18)
+                    Text("Work")
+                        .font(.subheadline.weight(.medium))
+                        .frame(width: 40, alignment: .leading)
+                    Slider(value: Binding(
+                        get: { Double(workMinutes) },
+                        set: { workMinutes = Int($0) }
+                    ), in: 10...120, step: 5)
+                    .tint(accentOrange)
+                    Text("\(workMinutes) min")
+                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                        .frame(width: 50, alignment: .trailing)
+                }
+            }
+            .padding(.horizontal, 16)
+
+            // Summary row + launch button
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Your plan")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    HStack(spacing: 6) {
+                        Label("\(relaxMinutes)m relax", systemImage: "moon.fill")
+                            .font(.caption.weight(.semibold))
+                            .foregroundColor(accentGreen)
+                        Text("→")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Label("\(workMinutes)m work", systemImage: "bolt.fill")
+                            .font(.caption.weight(.semibold))
+                            .foregroundColor(accentOrange)
+                    }
+                }
+
+                Spacer()
+
+                Button {
+                    manager.startFocusSession(
+                        relaxSeconds: relaxMinutes * 60,
+                        workSeconds:  workMinutes  * 60
+                    )
+                    withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
+                        showSessionPicker = false
+                    }
+                } label: {
+                    HStack(spacing: 7) {
+                        Image(systemName: "play.fill").font(.system(size: 11))
+                        Text("Begin Session").font(.system(size: 13, weight: .bold))
+                    }
+                    .foregroundColor(.black)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 9)
+                    .background(RoundedRectangle(cornerRadius: 9).fill(accentGreen))
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 14)
+        }
+        .background(Color(NSColor.controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 0))
+    }
+
+    private func presetButton(label: String, icon: String, relax: Int, work: Int, color: Color) -> some View {
+        let isSelected = relaxMinutes == relax && workMinutes == work
+        return Button {
+            relaxMinutes = relax
+            workMinutes  = work
+        } label: {
+            HStack(spacing: 6) {
+                Text(icon).font(.system(size: 15))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(label)
+                        .font(.system(size: 12, weight: .bold))
+                    Text("\(relax)m / \(work)m")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .frame(maxWidth: .infinity)
+            .background(
+                RoundedRectangle(cornerRadius: 9)
+                    .fill(isSelected ? color.opacity(0.15) : Color(NSColor.windowBackgroundColor))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 9)
+                            .stroke(isSelected ? color : Color.secondary.opacity(0.2), lineWidth: 1.5)
+                    )
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    // ── Active session badge ──────────────────────────────────────────────────
+
+    private var activeSessionBadge: some View {
+        let isRelax = manager.focusPhase == .relaxing
+        let color   = isRelax ? accentGreen : accentOrange
+        let label   = isRelax ? "Relaxing…"  : "Working…"
+        return HStack(spacing: 7) {
+            Circle()
+                .fill(color)
+                .frame(width: 7, height: 7)
+            Text(label)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(color)
+        }
+        .padding(.horizontal, 11)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(color.opacity(0.12))
+        )
+    }
+
+    // ── Reflection row ────────────────────────────────────────────────────────
 
     private func reflectionRow(_ entry: ReflectionEntry) -> some View {
         VStack(alignment: .leading, spacing: 6) {
